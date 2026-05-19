@@ -29,7 +29,9 @@ public struct PDFDocumentLoader: DocumentLoader {
 
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 #if canImport(Vision)
-                text = (try? performOCR(on: page)) ?? text
+                if #available(iOS 13.0, macOS 10.15, *) {
+                    text = (try? performOCR(on: page)) ?? text
+                }
                 #endif
             }
 
@@ -48,6 +50,7 @@ public struct PDFDocumentLoader: DocumentLoader {
 
     #if canImport(Vision)
     /// Falls back to Vision OCR so image-only PDFs still produce searchable text.
+    @available(iOS 13.0, macOS 10.15, *)
     private func performOCR(on page: PDFPage) throws -> String {
         guard let image = render(page: page, maxDimension: 2048) else { return "" }
 
@@ -64,6 +67,7 @@ public struct PDFDocumentLoader: DocumentLoader {
     }
 
     /// Rasterizes a PDF page with bounded dimensions to avoid excessive memory usage during OCR.
+    @available(iOS 13.0, macOS 10.15, *)
     private func render(page: PDFPage, maxDimension: CGFloat) -> CGImage? {
         let bounds = page.bounds(for: .mediaBox)
         guard bounds.width > 0 && bounds.height > 0 else { return nil }

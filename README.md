@@ -1,276 +1,181 @@
 # Folio
 
-Folio is a zero‑config retrieval engine for iOS and macOS.  
-It ingests PDFs and text, strips headers/footers, chunks content, and indexes it into SQLite with **BM25 (FTS5)**.
+Folio is an early Swift Package for building retrieval-augmented generation cores on Apple platforms. It currently focuses on ingestion, chunking, local SQLite search, optional contextual prefixes, vector storage, and an OpenAI-compatible chat client.
 
-It also supports **Anthropic‑style contextual retrieval**:
-- LLM‑generated **one‑line prefixes** per chunk (using Folio’s prompt templates)
-- Optional **contextual embeddings** (e.g., EmbeddingGemma, LLaMA)
-- **Hybrid search**: BM25 + vectors with rank fusion
-- **Neighbor expansion**: join ± adjacent chunks for coherent RAG passages
+The package targets iOS 26+ for apps and macOS 26+ so the package can build and test on local macOS hosts.
 
----
+## Current Features
 
-## Installation — Swift Package Manager
+- PDF and plain text ingestion
+- PDF text extraction with Vision OCR fallback when available
+- Universal text chunking
+- Header and footer cleanup
+- SQLite storage with FTS5 BM25 search
+- Contextual prefix hooks and prefix cache
+- Apple Foundation Models prefix helper when `FoundationModels` is available on iOS 26+ or macOS 26+
+- Vector storage for embedded chunks
+- Hybrid retrieval prototype using BM25 candidates, cosine scoring, rank fusion, and neighbor expansion
+- OpenAI-compatible chat completions client for local runtimes or hosted providers
 
-### Xcode
-1. **File → Add Packages…**
-2. Enter: `https://github.com/lolbigtime/Folio`
-3. Add the **Folio** product to your app target.
+## Planned Features
 
-> **Note:** SPM resources are already configured. Make sure your app bundles the package resources (the SQL migration files) automatically. No extra steps needed in most projects.
+- DOCX ingestion
+- Image indexing beyond PDF OCR fallback
+- LiteRT-LM Gemma generation integration
+- True on-device EmbeddingGemma support
+- High-level `answer()` orchestration
+- Full vector candidate search instead of BM25-first hybrid retrieval
+- Citation generation and source attribution helpers
 
-### `Package.swift` (if integrating programmatically)
+## Installation
+
+Add Folio with Swift Package Manager:
+
 ```swift
-// In your app’s Package.swift
 .dependencies = [
     .package(url: "https://github.com/lolbigtime/Folio", .upToNextMinor(from: "0.1.0"))
 ]
-// In your target:
+```
+
+Then add the library product to your target:
+
+```swift
 .product(name: "Folio", package: "Folio")
 ```
 
----
-
-## Pipeline
-
-```mermaid
-flowchart TD
-    A[PDF or Text input] --> B[DocumentLoader]
-    B --> C[HeaderFooterFilter]
-    C --> D[Chunker]
-    D --> E{Add contextual prefix}
-    E -- yes --> F[LLM prefix generator]
-    E -- no --> G[Raw chunks]
-    F --> H[Augmented chunk - prefix + text]
-    G --> H
-    H --> I[Embedder optional]
-    H --> J[SQLite FTS5 BM25 index]
-    I --> K[Vector store]
-    J --> L[BM25 search]
-    K --> M[Vector scoring]
-    L --> N[Rank fusion]
-    M --> N
-    N --> O[Neighbor expansion]
-    O --> P[Retrieved passages]
-```
-
----
+SPM resources are configured for the bundled SQL migrations.
 
 ## Quick Start
 
-### Basic BM25
 ```swift
 import Folio
 
-let folio = try FolioEngine()
-try folio.ingest(.text("hello world from folio", name: "note.txt"), sourceId: "T1")
+let folio = try FolioEngine.inMemory()
+
+try folio.ingest(
+    .text("hello world from folio", name: "note.txt"),
+    sourceId: "T1"
+)
 
 let hits = try folio.search("hello", in: "T1", limit: 5)
-for h in hits {
-    print("• \(h.sourceId): \(h.excerpt)")
+for hit in hits {
+    print("\(hit.sourceId): \(hit.excerpt)")
 }
 ```
 
-### Contextual prefixes with an LLM
+## PDF Ingestion
+
 ```swift
-var cfg = FolioConfig()
-cfg.indexing.useContextualPrefix = true
-cfg.indexing.contextFn = { doc, page, chunk in
-    let prompt = LLMPrefixPrompter.build(ChunkContext(
-        docName: doc.name,
-        pageIndex: page.index,
-        sectionHeader: page.header,
-        chunkText: chunk
-    ))
+let engine = try FolioEngine.inMemory()
+try engine.ingest(.pdf(pdfURL), sourceId: "manual")
+
+let passages = try engine.searchWithContext(
+    "optimizer settings",
+    in: "manual",
+    limit: 3,
+    expand: 1
+)
+```
+
+PDF text is extracted with PDFKit. If a page has no extractable text, Folio attempts Vision OCR on platforms where Vision text recognition is available.
+
+## Contextual Prefixes
+
+Folio can prepend a short context line to each chunk before indexing. By default it uses the built-in `Contextualizer`. For async ingestion, you can provide your own LLM-backed prefix function:
+
+```swift
+var config = FolioConfig()
+config.indexing.useContextualPrefix = true
+config.indexing.contextFn = { doc, page, chunk in
+    let prompt = LLMPrefixPrompter.build(
+        ChunkContext(
+            docName: doc.name,
+            pageIndex: page.index,
+            chunkText: chunk
+        )
+    )
+
     let raw = try await MyLocalLLM.generate(
         prompt: prompt,
         maxTokens: LLMPrefixPrompter.maxOutputTokens,
-        temperature: 0.2,
         stop: LLMPrefixPrompter.stop
     )
+
     return LLMPrefixPrompter.sanitize(raw)
 }
 
-let folio = try FolioEngine()
-_ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
+_ = try await engine.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: config)
 ```
 
-### Hybrid retrieval (BM25 + vectors + fusion + expand)
+### Apple Foundation Models Prefixes
+
+When the `FoundationModels` framework is available, Folio exposes helpers for iOS 26+ and macOS 26+:
+
 ```swift
-let gemma = EmbeddingGemmaEmbedder(
+if #available(iOS 26.0, macOS 26.0, *) {
+    var config = FolioConfig()
+    config.indexing.useFoundationModelPrefixes()
+
+    _ = try await engine.ingestAsync(
+        .pdf(pdfURL),
+        sourceId: "Doc1",
+        config: config
+    )
+}
+```
+
+Configuration stays within Folio's wrapper type:
+
+```swift
+if #available(iOS 26.0, macOS 26.0, *) {
+    var config = FolioConfig()
+    config.indexing = .foundationModelPrefixes(
+        configuration: .init(
+            instructions: "Keep prefixes under 8 words.",
+            locale: "en",
+            temperature: 0.1
+        )
+    )
+}
+```
+
+## Hybrid Retrieval
+
+Pass an `Embedder` implementation to `FolioEngine`, ingest with `ingestAsync`, and backfill missing vectors when needed:
+
+```swift
+let embedder = EmbeddingGemmaEmbedder(
     configuration: .init(
         baseURL: URL(string: "http://127.0.0.1:11434")!,
         model: "gemma:2b"
     )
 )
 
-let engine = try FolioEngine(
-    databaseURL: dbURL,
-    loaders: [PDFDocumentLoader(), TextDocumentLoader()],
-    chunker: UniversalChunker(),
-    embedder: gemma
+let engine = try FolioEngine.inMemory(embedder: embedder)
+_ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note")
+try engine.backfillEmbeddings()
+
+let results = try engine.searchHybrid(
+    "streaming mode",
+    in: "note",
+    limit: 5,
+    expand: 1
 )
-
-try engine.backfillEmbeddings() // populate vectors for cosine scoring
-
-let results = try engine.searchHybrid("optimizer settings", in: "Doc1", limit: 5, expand: 1)
-for r in results {
-    print("• \(r.sourceId) p.\(r.startPage ?? 0)  [bm25=\(r.bm25), cos=\(r.cosine ?? .nan), score=\(r.score)]")
-}
 ```
 
-### End-to-end example (PDF + text + hybrid search + LLM answer)
-```swift
-import Folio
-import Foundation
+`EmbeddingGemmaEmbedder` is currently an HTTP adapter for a local embedding runtime. Native on-device EmbeddingGemma integration is planned.
 
-let gemma = EmbeddingGemmaEmbedder(
-    configuration: .init(model: "gemma:2b")
-)
+## OpenAI-Compatible Chat
 
-let engine = try FolioEngine(embedder: gemma)
-
-// Ingest different document types
-try engine.ingest(.pdf(pdfURL), sourceId: "manual")
-let noteText = try String(decoding: Data(contentsOf: notesURL), as: UTF8.self)
-try engine.ingest(.text(noteText, name: "release-notes.txt"), sourceId: "notes")
-
-// Make sure every chunk has a vector before hybrid search
-try engine.backfillEmbeddings(batch: 96)
-
-let passages = try engine.searchHybrid(
-    "How do I configure streaming mode?",
-    limit: 3,
-    expand: 2
-)
-
-let context = passages
-    .map { "Source: \($0.sourceId) page \($0.startPage ?? 0)\n\($0.text)" }
-    .joined(separator: "\n\n---\n\n")
-
-let client = OpenAIStyleClient() // defaults to Ollama's /v1/chat/completions on localhost
-
-Task {
-    let answer = try await client.chatCompletion(
-        model: "gpt-4o-mini",
-        messages: [
-            .init(role: .system, content: "You are a precise technical assistant."),
-            .init(
-                role: .user,
-                content: "Using only the provided documentation, answer: How do I configure streaming mode?\n\nContext:\n\(context)"
-            )
-        ],
-        temperature: 0.2,
-        maxTokens: 256
-    ).choices.first?.message.content ?? ""
-
-    print(answer)
-}
-```
-
----
-
-## Using a Local LLM for Prefixes
-
-Folio ships **prompt templates** (`LLMPrefixPrompter`, `ChunkContext`) that follow Anthropic’s cookbook.
-You can use **any** on‑device or remote LLM:
-
-- **On device (recommended):** run a small instruction model (e.g., Gemma‑Instruct, LLaMA‑Instruct, Apple’s Foundation Models) via your preferred runtime (ggml/gguf, MLC, llama.cpp wrapper, etc.).
-- Return **one short line** (≤~80 tokens) per chunk. Folio caches it in `prefix_cache` and prepends it during indexing and embedding.
-
-### Contextual prefixes with Apple Foundation models
-
-On iOS 18 / macOS 15 and newer you can call the on-device **Foundation Models** framework directly—no extra runtime required.
-
-Start with the retrofit helper built into Folio’s indexing config. It wires up the `LanguageModelSession`, caches responses, and gracefully falls back to the built-in contextualizer when Apple Intelligence isn’t available:
+`OpenAIStyleClient` posts to `v1/chat/completions`. By default it uses `http://127.0.0.1:11434`, which matches Ollama's OpenAI-compatible endpoint without duplicating `/v1`.
 
 ```swift
-if #available(iOS 18, macOS 15, *) {
-    var cfg = FolioConfig()
-    cfg.indexing.useFoundationModelPrefixes()
-
-    _ = try await engine.ingestAsync(
-        .pdf(pdfURL),
-        sourceId: "Doc1",
-        config: cfg
-    )
-}
-```
-
-> **Advanced configuration:** Need to customize locale, instructions, or generation options? Build the indexing config explicitly and reuse it across ingests.
-
-```swift
-if #available(iOS 18, macOS 15, *) {
-    var options = GenerationOptions()
-    options.temperature = 0.1
-
-    var cfg = FolioConfig()
-    cfg.indexing = .foundationModelPrefixes(
-        configuration: .init(
-            instructions: "Keep prefixes under 8 words.",
-            locale: "en",
-            options: options
-        )
-    )
-
-    _ = try await engine.ingestAsync(
-        .pdf(pdfURL),
-        sourceId: "Doc1",
-        config: cfg
-    )
-}
-```
-
-### Other local or remote models
-
-Minimal app‑side hook (already shown above):
-```swift
-cfg.indexing.contextFn = { doc, page, chunk in
-    let prompt = LLMPrefixPrompter.build(ChunkContext(docName: doc.name, pageIndex: page.index, chunkText: chunk))
-    let raw = try await MyLocalLLM.generate(prompt: prompt,
-                                            maxTokens: LLMPrefixPrompter.maxOutputTokens,
-                                            stop: LLMPrefixPrompter.stop)
-    return LLMPrefixPrompter.sanitize(raw)
-}
-```
-
----
-
-## Using EmbeddingGemma (or another embedder)
-
-Folio exposes an `Embedder` protocol:
-
-```swift
-public protocol Embedder: Sendable {
-    func embed(_ text: String) throws -> [Float]
-    func embedBatch(_ texts: [String]) throws -> [[Float]]
-}
-```
-
-To use **EmbeddingGemma** locally:
-1. Install [Ollama](https://ollama.com) (or another on-device runtime) and run `ollama pull gemma:2b`.
-2. Start the Ollama service (`ollama serve`), which listens on `http://127.0.0.1:11434`.
-3. Initialize `EmbeddingGemmaEmbedder(configuration:)` with the model name you pulled (for example `gemma:2b`).
-4. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest so cosine has vectors for every BM25 chunk.
-5. (Optional) If you use a different runtime, conform to `Embedder` and proxy to its embedding API.
-
-**Tip:** Embed **`prefix + chunk`** (Folio’s ingest already composes this) to get contextual embeddings.
-
----
-
-## Calling OpenAI-style LLMs
-
-`OpenAIStyleClient` wraps the `/chat/completions` API surfaced by on-device runtimes such as **Ollama** (default) as well as hoste
-d providers:
-
-```swift
-let client = OpenAIStyleClient() // defaults to http://127.0.0.1:11434/v1
+let client = OpenAIStyleClient()
 
 let completion = try await client.chatCompletion(
     model: "gpt-4o-mini",
     messages: [
-        .init(role: .system, content: "You are a succinct assistant."),
+        .init(role: .system, content: "You are a concise assistant."),
         .init(role: .user, content: "Summarize this: ...")
     ],
     temperature: 0.3,
@@ -280,53 +185,32 @@ let completion = try await client.chatCompletion(
 print(completion.choices.first?.message.content ?? "")
 ```
 
-Use the same client for ingest-time prefix generation or final answer synthesis.
-
----
-
-## Public API (high‑level)
+For hosted providers, pass a custom base URL and API key:
 
 ```swift
-public final class FolioEngine {
-    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws
-    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws -> FolioEngine
-    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embedder: Embedder?) throws
-
-    @discardableResult
-    public func ingest(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) throws -> (pages: Int, chunks: Int)
-
-    @discardableResult
-    public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int)
-
-    public func backfillEmbeddings(for sourceId: String? = nil, batch: Int = 64) throws
-
-    public func search(_ query: String, in sourceId: String? = nil, limit: Int = 10) throws -> [Snippet]
-    public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage]
-    public func searchHybrid(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult]
-
-    public func deleteSource(_ sourceId: String) throws
-    public func listSources() throws -> [Source]
-}
+let client = OpenAIStyleClient(
+    configuration: .init(
+        baseURL: URL(string: "https://api.openai.com")!,
+        apiKey: apiKey
+    )
+)
 ```
 
----
+## Development
 
-## Schema / Migrations
+```bash
+swift test
+```
+
+## Schema
 
 Migrations are bundled as SPM resources and applied at runtime:
 
-- `001_core.sql` — `sources`, `doc_chunks`
-- `002_fts.sql` — `doc_chunks_fts` (FTS5 mirror)
-- `003_indexes.sql` — helpful indexes
-- `004_prefix_cache.sql` — `prefix_cache` for LLM prefixes
-- `005_embeddings.sql` — `doc_chunk_vectors(rowid, dim, vec BLOB)`
-
-Notes:
-- `section_title` stores the prefix; FTS content receives **prefix + chunk**.
-- `searchWithContext` shows prefix‑free snippets; hybrid uses the same candidates plus vectors.
-
----
+- `001_core.sql`: `sources`, `doc_chunks`
+- `002_fts.sql`: `doc_chunks_fts`
+- `003_indexes.sql`: indexes
+- `004_prefix_cache.sql`: contextual prefix cache
+- `005_embeddings.sql`: vector storage
 
 ## License
 

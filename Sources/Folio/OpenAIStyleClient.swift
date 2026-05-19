@@ -9,7 +9,7 @@ public struct OpenAIStyleClient: Sendable {
         public let apiKey: String?
         public let timeout: TimeInterval
 
-        public init(baseURL: URL = URL(string: "http://127.0.0.1:11434/v1")!, apiKey: String? = nil, timeout: TimeInterval = 60) {
+        public init(baseURL: URL = URL(string: "http://127.0.0.1:11434")!, apiKey: String? = nil, timeout: TimeInterval = 60) {
             self.baseURL = baseURL
             self.apiKey = apiKey
             self.timeout = timeout
@@ -79,17 +79,20 @@ public struct OpenAIStyleClient: Sendable {
 
     private let config: Configuration
 
-    public init(configuration: Configuration) {
+    public init(configuration: Configuration = .init()) {
         self.config = configuration
     }
 
     public func chatCompletion(model: String, messages: [ChatMessage], temperature: Double? = nil, maxTokens: Int? = nil) async throws -> ChatCompletionResponse {
         let request = ChatCompletionRequest(model: model, messages: messages, temperature: temperature, maxTokens: maxTokens)
-        return try await performRequest(path: "v1/chat/completions", body: request)
+        return try await performRequest(url: chatCompletionsURL, body: request)
     }
 
-    private func performRequest<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
-        let url = config.baseURL.appendingPathComponent(path)
+    var chatCompletionsURL: URL {
+        config.baseURL.appendingPathComponent("v1/chat/completions")
+    }
+
+    private func performRequest<Body: Encodable, Response: Decodable>(url: URL, body: Body) async throws -> Response {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

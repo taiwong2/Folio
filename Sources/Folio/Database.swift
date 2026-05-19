@@ -13,7 +13,11 @@ internal struct AppDatabase {
     internal let dbQueue: DatabaseQueue
     
     internal init(path: String) throws {
-        dbQueue = try DatabaseQueue(path: path)
+        if path == ":memory:" || URL(fileURLWithPath: path).lastPathComponent == ":memory:" {
+            dbQueue = try DatabaseQueue()
+        } else {
+            dbQueue = try DatabaseQueue(path: path)
+        }
         try migrate()
     }
     
@@ -38,4 +42,3 @@ internal struct AppDatabase {
         }
     }
 }
-

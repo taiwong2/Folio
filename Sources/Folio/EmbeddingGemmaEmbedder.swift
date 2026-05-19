@@ -61,15 +61,15 @@ public struct EmbeddingGemmaEmbedder: Embedder {
         request.httpBody = try JSONEncoder().encode(EmbeddingRequest(model: config.model, input: text))
 
         let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<(Data, URLResponse), Error>?
+        let result = LockedResult<Result<(Data, URLResponse), Error>>()
 
         let task = session.dataTask(with: request) { data, response, error in
             if let error {
-                result = .failure(error)
+                result.set(.failure(error))
             } else if let data, let response {
-                result = .success((data, response))
+                result.set(.success((data, response)))
             } else {
-                result = .failure(NSError(domain: "Folio", code: 520, userInfo: [NSLocalizedDescriptionKey: "Empty embedding response"]))
+                result.set(.failure(NSError(domain: "Folio", code: 520, userInfo: [NSLocalizedDescriptionKey: "Empty embedding response"])))
             }
             semaphore.signal()
         }
@@ -81,7 +81,7 @@ public struct EmbeddingGemmaEmbedder: Embedder {
             throw NSError(domain: "Folio", code: 521, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request timed out"])
         }
 
-        guard let outcome = result else {
+        guard let outcome = result.get() else {
             throw NSError(domain: "Folio", code: 522, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request missing result"])
         }
 
@@ -109,3 +109,19 @@ private struct EmbeddingResponse: Decodable {
     let embedding: [Double]
 }
 
+private final class LockedResult<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value?
+
+    func set(_ value: Value) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    func get() -> Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}

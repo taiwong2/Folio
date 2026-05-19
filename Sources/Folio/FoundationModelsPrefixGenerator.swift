@@ -1,24 +1,26 @@
 import Foundation
+
+#if canImport(FoundationModels)
 import FoundationModels
 
+@available(iOS 26.0, macOS 26.0, *)
 public actor FoundationModelsPrefixGenerator {
     public struct Configuration: Sendable {
         public var instructions: String
         public var locale: String?
-        public var options: GenerationOptions
+        public var maximumResponseTokens: Int?
+        public var temperature: Double?
 
         public init(
             instructions: String = FoundationModelsPrefixGenerator.defaultInstructions,
             locale: String? = nil,
-            options: GenerationOptions? = nil
+            maximumResponseTokens: Int? = LLMPrefixPrompter.maxOutputTokens,
+            temperature: Double? = nil
         ) {
-            var resolved = options ?? GenerationOptions()
-            if resolved.maximumResponseTokens == nil {
-                resolved.maximumResponseTokens = LLMPrefixPrompter.maxOutputTokens
-            }
             self.instructions = instructions
             self.locale = locale
-            self.options = resolved
+            self.maximumResponseTokens = maximumResponseTokens
+            self.temperature = temperature
         }
     }
 
@@ -45,7 +47,7 @@ public actor FoundationModelsPrefixGenerator {
         context: ChunkContext? = nil
     ) async throws -> String {
         guard case .available = SystemLanguageModel.default.availability else {
-            throw UnavailableError.state(SystemLanguageModel.default.availability)
+            throw UnavailableError.state(String(describing: SystemLanguageModel.default.availability))
         }
 
         let header = page.text
@@ -63,7 +65,7 @@ public actor FoundationModelsPrefixGenerator {
         )
         
         let prompt = LLMPrefixPrompter.build(ctx)
-        let raw = try await session.respond(to: prompt, options: configuration.options)
+        let raw = try await session.respond(to: prompt, options: configuration.generationOptions)
         let sanitized = LLMPrefixPrompter.sanitize(raw.content)
 
         guard !sanitized.isEmpty else {
@@ -103,10 +105,23 @@ public actor FoundationModelsPrefixGenerator {
     }
 
     public enum UnavailableError: Error, Sendable {
-        case state(SystemLanguageModel.Availability)
+        case state(String)
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
+private extension FoundationModelsPrefixGenerator.Configuration {
+    var generationOptions: GenerationOptions {
+        var options = GenerationOptions()
+        options.maximumResponseTokens = maximumResponseTokens
+        if let temperature {
+            options.temperature = temperature
+        }
+        return options
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, *)
 public extension IndexingConfig {
     static func foundationModelPrefixes(
         configuration: FoundationModelsPrefixGenerator.Configuration = .init()
@@ -130,3 +145,5 @@ public extension IndexingConfig {
         }
     }
 }
+
+#endif // canImport(FoundationModels)

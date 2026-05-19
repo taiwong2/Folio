@@ -21,4 +21,9 @@ final class FolioSmokeTests: XCTestCase {
 
         XCTAssertEqual(text, "multiline\nre-entry")
     }
+
+    func testOpenAIStyleClientDefaultURLDoesNotDuplicateV1() {
+        let client = OpenAIStyleClient()
+        XCTAssertEqual(client.chatCompletionsURL.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
+    }
 }
