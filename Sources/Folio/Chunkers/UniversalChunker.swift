@@ -19,7 +19,7 @@ public struct UniversalChunker: Chunker {
         var ordinal = 0
         for page in doc.pages {
             let sections = markdownSections(in: page.text)
-            let pageSections = sections.isEmpty ? [(title: String?.none, text: page.text)] : sections
+            let pageSections = sections.isEmpty ? [(title: String?.none, parentKey: String?.none, text: page.text)] : sections
 
             for section in pageSections {
                 let units = chooseUnits(section.text)
@@ -27,7 +27,8 @@ public struct UniversalChunker: Chunker {
                 func flush() {
                     let trimmed = buf.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
-                        out.append(Chunk(sourceId: sourceId, page: page.index, text: trimmed, ordinal: ordinal, sectionTitle: section.title))
+                        let parentId = section.parentKey.map { "\(sourceId):p\(page.index):\($0)" }
+                        out.append(Chunk(sourceId: sourceId, page: page.index, text: trimmed, ordinal: ordinal, sectionTitle: section.title, parentId: parentId))
                         ordinal += 1
                     }
 
@@ -53,26 +54,33 @@ public struct UniversalChunker: Chunker {
     }
 }
 
-private func markdownSections(in text: String) -> [(title: String?, text: String)] {
+private func markdownSections(in text: String) -> [(title: String?, parentKey: String?, text: String)] {
     let lines = text.components(separatedBy: .newlines)
-    var sections: [(title: String?, text: String)] = []
-    var currentTitle: String?
+    var sections: [(title: String?, parentKey: String?, text: String)] = []
+    var headingStack: [(level: Int, title: String)] = []
+    var currentParentKey: String?
     var currentLines: [String] = []
     var sawHeading = false
+    var sectionOrdinal = 0
 
     func flush() {
         let body = currentLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         if !body.isEmpty {
-            sections.append((title: currentTitle, text: body))
+            let titlePath = headingStack.map(\.title).joined(separator: " > ")
+            let title = titlePath.isEmpty ? nil : titlePath
+            sections.append((title: title, parentKey: currentParentKey, text: body))
         }
         currentLines.removeAll(keepingCapacity: true)
     }
 
     for line in lines {
-        if let heading = markdownHeadingTitle(line) {
+        if let heading = markdownHeading(line) {
             sawHeading = true
             flush()
-            currentTitle = heading
+            headingStack.removeAll { $0.level >= heading.level }
+            headingStack.append(heading)
+            sectionOrdinal += 1
+            currentParentKey = "s\(sectionOrdinal)"
         } else {
             currentLines.append(line)
         }
@@ -82,7 +90,7 @@ private func markdownSections(in text: String) -> [(title: String?, text: String
     return sawHeading ? sections : []
 }
 
-private func markdownHeadingTitle(_ line: String) -> String? {
+private func markdownHeading(_ line: String) -> (level: Int, title: String)? {
     let trimmed = line.trimmingCharacters(in: .whitespaces)
     guard trimmed.hasPrefix("#") else { return nil }
 
@@ -100,7 +108,7 @@ private func markdownHeadingTitle(_ line: String) -> String? {
     guard afterMarkers.first == " " else { return nil }
 
     let title = afterMarkers.trimmingCharacters(in: .whitespaces)
-    return title.isEmpty ? nil : title
+    return title.isEmpty ? nil : (markerCount, title)
 }
 
 private func chooseUnits(_ text: String) -> [String] {

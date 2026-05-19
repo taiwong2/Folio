@@ -36,6 +36,7 @@ extension DocChunkStore {
         public let chunkId: String
         public let sourceId: String
         public let sourceDisplayName: String
+        public let sourceFileType: String?
         public let page: Int?
         public let sectionTitle: String?
         public let excerpt: String
@@ -48,6 +49,7 @@ extension DocChunkStore {
         public let text: String
         public let page: Int?
         public let sectionTitle: String?
+        public let parentId: String?
     }
 
     public struct VectorRow: Sendable {
@@ -113,7 +115,7 @@ extension DocChunkStore {
         }
     }
     
-    func ftsHits(query: String, inSource source: String? = nil, limit: Int = 10) throws -> [SnippetHit] {
+    func ftsHits(query: String, inSource source: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 10) throws -> [SnippetHit] {
         try dbQueue.read { db in
             var sql = """
             SELECT
@@ -121,6 +123,7 @@ extension DocChunkStore {
               d.id AS chunk_id,
               d.source_id AS source_id,
               s.display_name AS source_display_name,
+              s.file_type AS source_file_type,
               d.page AS page,
               d.section_title AS section_title,
               REPLACE(
@@ -141,6 +144,8 @@ extension DocChunkStore {
                 args.append(s)
             }
 
+            appendFilterSQL(filter, sql: &sql, args: &args)
+
             sql += " ORDER BY score LIMIT ?"
             args.append(limit)
 
@@ -151,6 +156,7 @@ extension DocChunkStore {
                     chunkId: $0["chunk_id"],
                     sourceId: $0["source_id"],
                     sourceDisplayName: $0["source_display_name"],
+                    sourceFileType: $0["source_file_type"],
                     page: $0["page"],
                     sectionTitle: $0["section_title"],
                     excerpt: $0["excerpt"],
@@ -163,7 +169,7 @@ extension DocChunkStore {
     func fetchNeighbors(sourceId: String, around rowid: Int64, expand: Int) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let prevRows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page, section_title
+                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid < ?
                 ORDER BY rowid DESC
@@ -171,7 +177,7 @@ extension DocChunkStore {
             """, arguments: [sourceId, rowid, expand]).reversed()
 
             let nextRows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page, section_title
+                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid >= ?
                 ORDER BY rowid ASC
@@ -179,7 +185,7 @@ extension DocChunkStore {
             """, arguments: [sourceId, rowid, expand + 1])
 
             let toChunk: (Row) -> NeighborChunk = { r in
-                NeighborChunk(rowid: r["rowid"], chunkId: r["chunk_id"], text: r["content"], page: r["page"], sectionTitle: r["section_title"])
+                NeighborChunk(rowid: r["rowid"], chunkId: r["chunk_id"], text: r["content"], page: r["page"], sectionTitle: r["section_title"], parentId: r["parent_id"])
             }
             return prevRows.map(toChunk) + nextRows.map(toChunk)
         }
@@ -188,7 +194,7 @@ extension DocChunkStore {
     func fetchAllChunks(forSourceId sourceId: String) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let rows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page, section_title
+                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id
                 FROM doc_chunks
                 WHERE source_id = ?
                 ORDER BY rowid ASC
@@ -200,7 +206,8 @@ extension DocChunkStore {
                     chunkId: row["chunk_id"],
                     text: row["content"],
                     page: row["page"],
-                    sectionTitle: row["section_title"]
+                    sectionTitle: row["section_title"],
+                    parentId: row["parent_id"]
                 )
             }
         }
@@ -223,7 +230,7 @@ extension DocChunkStore {
             }
 
             let rows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page, section_title
+                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid >= ?
                 ORDER BY rowid ASC
@@ -235,7 +242,8 @@ extension DocChunkStore {
                     chunkId: row["chunk_id"],
                     text: row["content"],
                     page: row["page"],
-                    sectionTitle: row["section_title"]
+                    sectionTitle: row["section_title"],
+                    parentId: row["parent_id"]
                 )
             }
         }
@@ -414,11 +422,12 @@ internal struct DocChunkStore {
         }
     }
 
-    func ftsSnippets(query: String, inSource source: String? = nil, limit: Int = 10) throws -> [Snippet] {
+    func ftsSnippets(query: String, inSource source: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 10) throws -> [Snippet] {
         try dbQueue.read { db in
             var sql = """
                 SELECT d.source_id, d.page, snippet(doc_chunks_fts, 0, '', '', '…', 18) AS excerpt, bm25(doc_chunks_fts) AS score
                 FROM doc_chunks AS d
+                JOIN sources AS s ON s.id = d.source_id
                 JOIN doc_chunks_fts ON doc_chunks_fts.rowid = d.rowid
                 WHERE doc_chunks_fts MATCH ?
             """
@@ -428,6 +437,8 @@ internal struct DocChunkStore {
                 sql += " AND (d.source_id = ? OR d.source_id LIKE ?)"
                 args.append(contentsOf: [s, "\(s) p.%"])
             }
+
+            appendFilterSQL(filter, sql: &sql, args: &args)
 
             sql += " ORDER BY score LIMIT ?"
             args.append(limit)
@@ -534,4 +545,28 @@ internal struct DocChunkStore {
             try db.execute(sql: "INSERT INTO doc_chunks_fts(doc_chunks_fts) VALUES('rebuild')")
         }
     }
+}
+
+private func appendFilterSQL(_ filter: RetrievalFilter, sql: inout String, args: inout [DatabaseValueConvertible]) {
+    if let sourceIds = filter.sourceIds, !sourceIds.isEmpty {
+        let ids = sourceIds.sorted()
+        sql += " AND d.source_id IN (\(placeholders(count: ids.count)))"
+        args.append(contentsOf: ids)
+    }
+
+    if let fileTypes = filter.fileTypes, !fileTypes.isEmpty {
+        let types = fileTypes.sorted()
+        sql += " AND s.file_type IN (\(placeholders(count: types.count)))"
+        args.append(contentsOf: types)
+    }
+
+    if let pageRange = filter.pageRange {
+        sql += " AND d.page BETWEEN ? AND ?"
+        args.append(pageRange.lowerBound)
+        args.append(pageRange.upperBound)
+    }
+}
+
+private func placeholders(count: Int) -> String {
+    Array(repeating: "?", count: count).joined(separator: ",")
 }

@@ -35,6 +35,18 @@ public struct FolioConfig {
     public init() {}
 }
 
+public struct RetrievalFilter: Sendable, Hashable {
+    public var sourceIds: Set<String>?
+    public var fileTypes: Set<String>?
+    public var pageRange: ClosedRange<Int>?
+
+    public init(sourceIds: Set<String>? = nil, fileTypes: Set<String>? = nil, pageRange: ClosedRange<Int>? = nil) {
+        self.sourceIds = sourceIds
+        self.fileTypes = fileTypes
+        self.pageRange = pageRange
+    }
+}
+
 public struct RetrievedPassage {
     public let sourceId: String
     public let startPage: Int?
@@ -58,9 +70,12 @@ public struct RetrievedResult: Sendable {
 public struct Citation: Sendable, Hashable, Codable {
     public let sourceId: String
     public let sourceName: String
+    public let fileType: String?
     public let page: Int?
     public let sectionTitle: String?
     public let chunkId: String
+    public let parentId: String?
+    public let excerpt: String?
 }
 
 public struct DocumentFetch: Sendable {
@@ -264,11 +279,11 @@ public final class FolioEngine {
     }
     
     @discardableResult
-    public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage] {
+    public func searchWithContext(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage] {
         precondition(limit > 0, "Limit needs to be greater than 0")
         precondition(expand >= 0, "Expand must be non-negative")
 
-        let hits = try store.ftsHits(query: query, inSource: sourceId, limit: max(limit * 6, 60))
+        let hits = try store.ftsHits(query: query, inSource: sourceId, filter: filter, limit: max(limit * 6, 60))
         
         var results: [RetrievedPassage] = []
         var usedRowids = Set<Int64>()
@@ -287,9 +302,12 @@ public final class FolioEngine {
                 Citation(
                     sourceId: h.sourceId,
                     sourceName: h.sourceDisplayName,
+                    fileType: h.sourceFileType,
                     page: $0.page,
                     sectionTitle: $0.sectionTitle,
-                    chunkId: $0.chunkId
+                    chunkId: $0.chunkId,
+                    parentId: $0.parentId,
+                    excerpt: h.excerpt
                 )
             }
             
@@ -377,10 +395,10 @@ public final class FolioEngine {
         }
     }
 
-    public func searchHybrid(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
+    public func searchHybrid(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
         precondition(limit > 0 && expand >= 0, "invalid params")
         
-        let hits = try store.ftsHits(query: query, inSource: sourceId, limit: max(limit * 6, 60))
+        let hits = try store.ftsHits(query: query, inSource: sourceId, filter: filter, limit: max(limit * 6, 60))
         if hits.isEmpty { return [] }
         
         var cosByRow: [Int64: Double] = [:]
@@ -441,9 +459,12 @@ public final class FolioEngine {
                 Citation(
                     sourceId: c.h.sourceId,
                     sourceName: c.h.sourceDisplayName,
+                    fileType: c.h.sourceFileType,
                     page: $0.page,
                     sectionTitle: $0.sectionTitle,
-                    chunkId: $0.chunkId
+                    chunkId: $0.chunkId,
+                    parentId: $0.parentId,
+                    excerpt: c.h.excerpt
                 )
             }
             out.append(.init(sourceId: c.h.sourceId, startPage: window.first?.page, excerpt: c.h.excerpt, text: window.map(\.text).joined(separator: "\n\n"), bm25: c.h.bm25, cosine: c.cos, score: c.fused, citations: citations))
@@ -457,8 +478,8 @@ public final class FolioEngine {
     }
 
     
-    public func search(_ query: String, in sourceId: String? = nil, limit: Int = 10) throws -> [Snippet] {
-        try store.ftsSnippets(query: query, inSource: sourceId, limit: limit)
+    public func search(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 10) throws -> [Snippet] {
+        try store.ftsSnippets(query: query, inSource: sourceId, filter: filter, limit: limit)
     }
     
     public func deleteSource(_ sourceId: String) throws {

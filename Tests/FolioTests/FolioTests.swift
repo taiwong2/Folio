@@ -79,7 +79,28 @@ final class FolioSmokeTests: XCTestCase {
         let passages = try folio.searchWithContext("retrieval", in: "guide", limit: 1, expand: 0)
         let passage = try XCTUnwrap(passages.first)
         XCTAssertEqual(passage.citations.first?.sourceName, "guide.md")
-        XCTAssertEqual(passage.citations.first?.sectionTitle, "Installation")
+        XCTAssertEqual(passage.citations.first?.sectionTitle, "Guide > Installation")
+        XCTAssertEqual(passage.citations.first?.fileType, "markdown")
+        XCTAssertFalse(passage.citations.first?.parentId?.isEmpty ?? true)
+        XCTAssertFalse(passage.citations.first?.excerpt?.isEmpty ?? true)
         XCTAssertFalse(passage.citations.first?.chunkId.isEmpty ?? true)
+    }
+
+    func testRetrievalFiltersByFileType() throws {
+        let folio = try FolioEngine.inMemory()
+        let markdown = try XCTUnwrap("# Notes\n\nshared target phrase".data(using: .utf8))
+
+        _ = try folio.ingest(.text("shared target phrase", name: "note.txt"), sourceId: "text")
+        _ = try folio.ingest(.data(markdown, uti: "public.markdown", name: "note.md"), sourceId: "markdown")
+
+        let markdownOnly = try folio.searchWithContext(
+            "target",
+            filter: .init(fileTypes: ["markdown"]),
+            limit: 10,
+            expand: 0
+        )
+
+        XCTAssertEqual(Set(markdownOnly.map(\.sourceId)), ["markdown"])
+        XCTAssertEqual(markdownOnly.first?.citations.first?.fileType, "markdown")
     }
 }
