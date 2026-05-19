@@ -52,6 +52,15 @@ public struct RetrievedResult: Sendable {
     public let score: Double
 }
 
+public struct DocumentFetch: Sendable {
+    public let sourceId: String
+    public let displayName: String
+    public let startPage: Int?
+    public let endPage: Int?
+    public let text: String
+    public let chunkIds: [String]
+}
+
 public final class FolioEngine {
     private let db: AppDatabase
     private let store:  DocChunkStore
@@ -96,7 +105,7 @@ public final class FolioEngine {
     //Ingest any supported input with caller chosen sourceID
     @discardableResult
     public func ingest(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) throws -> (pages: Int, chunks: Int) {
-        guard let loader = loaders.first(where: { canLoad($0, input: input) }) else {
+        guard let loader = loaders.first(where: { $0.supports(input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
         
@@ -131,7 +140,7 @@ public final class FolioEngine {
     @discardableResult
     public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int) {
         
-        guard let loader = loaders.first(where: { canLoad($0, input: input) }) else {
+        guard let loader = loaders.first(where: { $0.supports(input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
         
@@ -169,19 +178,19 @@ public final class FolioEngine {
             }
 
             let augmented = prefix + c.text
-            let newRowId = try store.insertReturningRowid(
+            let newChunk = try store.insertReturningIdentifiers(
                 sourceId: c.sourceId,
                 page: c.page,
                 content: c.text,
                 sectionTitle: prefix,
                 ftsContent: augmented
             )
-            
+
             inserted += 1
             if let embedder {
                 let vec = try embedder.embed(augmented)
-                
-                try store.insertVector(rowid: newRowId, dim: vec.count, vector: vec)
+
+                try store.insertVector(chunkId: newChunk.chunkId, dim: vec.count, vector: vec)
             }
         }
 
@@ -193,7 +202,7 @@ public final class FolioEngine {
     public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage] {
         precondition(limit > 0, "Limit needs to be greater than 0")
         precondition(expand >= 0, "Expand must be non-negative")
-        
+
         let hits = try store.ftsHits(query: query, inSource: sourceId, limit: max(limit * 6, 60))
         
         var results: [RetrievedPassage] = []
@@ -218,6 +227,55 @@ public final class FolioEngine {
         return results
     }
 
+    public func fetchDocument(sourceId: String, startPage: Int? = nil, anchor: String? = nil, expand: Int = 2, maxChars: Int? = 8000) throws -> DocumentFetch {
+        precondition(expand >= 0 && expand <= 8, "expand must be between 0 and 8")
+        if let startPage {
+            precondition(startPage >= 0, "startPage must be non-negative")
+        }
+        if let maxChars {
+            precondition(maxChars > 0, "maxChars must be positive")
+        }
+
+        guard let source = try store.fetchSource(id: sourceId) else {
+            throw NSError(domain: "Folio", code: 404, userInfo: [NSLocalizedDescriptionKey: "Source not found"])
+        }
+
+        let trimmedAnchor = anchor?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAnchor = trimmedAnchor.flatMap { $0.isEmpty ? nil : $0 }
+        let anchorRowId = try normalizedAnchor.flatMap { try store.findAnchorRowid(sourceId: sourceId, anchor: $0) }
+
+        let chunks: [DocChunkStore.NeighborChunk]
+        if let rowid = anchorRowId {
+            chunks = try store.fetchNeighbors(sourceId: sourceId, around: rowid, expand: expand)
+        } else if let startPage {
+            chunks = try store.fetchChunks(forSourceId: sourceId, startingFromPage: startPage)
+        } else {
+            chunks = try store.fetchAllChunks(forSourceId: sourceId)
+        }
+
+        guard !chunks.isEmpty else {
+            return DocumentFetch(sourceId: sourceId, displayName: source.displayName, startPage: nil, endPage: nil, text: "", chunkIds: [])
+        }
+
+        let chunkIds = chunks.map(\.chunkId)
+        let startPage = chunks.compactMap(\.page).min()
+        let endPage = chunks.compactMap(\.page).max()
+
+        var text = chunks.map(\.text).joined(separator: "\n\n")
+        if let maxChars, text.count > maxChars {
+            text = String(text.prefix(maxChars))
+        }
+
+        return DocumentFetch(
+            sourceId: sourceId,
+            displayName: source.displayName,
+            startPage: startPage,
+            endPage: endPage,
+            text: text,
+            chunkIds: chunkIds
+        )
+    }
+
     /// Computes embeddings for any chunks that are missing a vector and persists them for hybrid search fusion.
     /// Keeping BM25 and cosine in sync is critical so both scorers see identical chunk sets.
     /// - Parameters:
@@ -233,17 +291,18 @@ public final class FolioEngine {
             let chunks = try store.fetchEmbeddableChunks(for: sourceId, limit: batch)
             if chunks.isEmpty { break }
 
-            let embeddings = try embedder.embedBatch(chunks.map(\.text))
+            let textsToEmbed = chunks.map(\.embeddingText)
+            let embeddings = try embedder.embedBatch(textsToEmbed)
             guard embeddings.count == chunks.count else {
                 throw NSError(domain: "Folio", code: 411, userInfo: [NSLocalizedDescriptionKey: "Embedding count mismatch"])
             }
 
             for (chunk, vector) in zip(chunks, embeddings) {
-                try store.insertVector(rowid: chunk.rowid, dim: vector.count, vector: vector)
+                try store.insertVector(chunkId: chunk.chunkId, dim: vector.count, vector: vector)
             }
         }
     }
-    
+
     public func searchHybrid(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
         precondition(limit > 0 && expand >= 0, "invalid params")
         
@@ -320,19 +379,11 @@ public final class FolioEngine {
     }
     
     public func deleteSource(_ sourceId: String) throws {
-        try store.deleteChunks(forSourceId: sourceId)
+        try store.deleteSource(id: sourceId)
     }
     
     public func listSources() throws -> [Source] {
         try store.listSources()
-    }
-    
-    private func canLoad(_ loader: DocumentLoader, input: IngestInput) -> Bool {
-        switch input {
-            case .pdf:  return loader is PDFDocumentLoader
-            case .text: return loader is TextDocumentLoader
-            case .data: return false // add a Data loader later
-        }
     }
     
     internal static func defaultDatabaseURL() throws -> URL {

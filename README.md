@@ -104,6 +104,91 @@ config.indexing.contextFn = { doc, page, chunk in
     return LLMPrefixPrompter.sanitize(raw)
 }
 
+let folio = try FolioEngine()
+_ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
+```
+
+### Hybrid retrieval (BM25 + vectors + fusion + expand)
+```swift
+#if canImport(MediaPipeTasksText)
+import MediaPipeTasksText
+#endif
+
+#if canImport(MediaPipeTasksText)
+let mpTextEmbedder = try TextEmbedder(modelPath: Bundle.main.path(forResource: "embedding_gemma", ofType: "task"))
+let gemma: Embedder = MediaPipeTextEmbedderAdapter(embedder: mpTextEmbedder)
+#else
+let gemma = EmbeddingGemmaEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "http://127.0.0.1:11434")!,
+        model: "gemma:2b"
+    )
+)
+#endif
+
+let engine = try FolioEngine(
+    databaseURL: dbURL,
+    loaders: [PDFDocumentLoader(), TextDocumentLoader()],
+    chunker: UniversalChunker(),
+    embedder: gemma
+)
+
+try engine.backfillEmbeddings() // populate vectors for cosine scoring
+
+let results = try engine.searchHybrid("optimizer settings", in: "Doc1", limit: 5, expand: 1)
+for r in results {
+    print("• \(r.sourceId) p.\(r.startPage ?? 0)  [bm25=\(r.bm25), cos=\(r.cosine ?? .nan), score=\(r.score)]")
+}
+```
+
+### End-to-end example (PDF + text + hybrid search + LLM answer)
+```swift
+import Folio
+import Foundation
+
+let gemma = EmbeddingGemmaEmbedder(
+    configuration: .init(model: "gemma:2b")
+)
+
+let engine = try FolioEngine(embedder: gemma)
+
+// Ingest different document types
+try engine.ingest(.pdf(pdfURL), sourceId: "manual")
+let noteText = try String(decoding: Data(contentsOf: notesURL), as: UTF8.self)
+try engine.ingest(.text(noteText, name: "release-notes.txt"), sourceId: "notes")
+
+// Make sure every chunk has a vector before hybrid search
+try engine.backfillEmbeddings(batch: 96)
+
+let passages = try engine.searchHybrid(
+    "How do I configure streaming mode?",
+    limit: 3,
+    expand: 2
+)
+
+let context = passages
+    .map { "Source: \($0.sourceId) page \($0.startPage ?? 0)\n\($0.text)" }
+    .joined(separator: "\n\n---\n\n")
+
+let client = OpenAIStyleClient() // defaults to Ollama's /v1/chat/completions on localhost
+
+Task {
+    let answer = try await client.chatCompletion(
+        model: "gpt-4o-mini",
+        messages: [
+            .init(role: .system, content: "You are a precise technical assistant."),
+            .init(
+                role: .user,
+                content: "Using only the provided documentation, answer: How do I configure streaming mode?\n\nContext:\n\(context)"
+            )
+        ],
+        temperature: 0.2,
+        maxTokens: 256
+    ).choices.first?.message.content ?? ""
+
+    print(answer)
+}
+
 _ = try await engine.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: config)
 ```
 

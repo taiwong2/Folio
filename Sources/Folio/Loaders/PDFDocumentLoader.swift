@@ -11,8 +11,45 @@ import PDFKit
 import Vision
 #endif
 
+private let placeholderGlyphScalars: Set<UnicodeScalar> = ["\u{FFFC}", "\u{F8FF}"]
+
+func needsOCR(forExtractedText text: String) -> Bool {
+    let meaningfulScalars = text.unicodeScalars.filter { scalar in
+        if CharacterSet.whitespacesAndNewlines.contains(scalar) { return false }
+        if placeholderGlyphScalars.contains(scalar) { return false }
+        if CharacterSet.controlCharacters.contains(scalar) { return false }
+        return true
+    }
+
+    guard !meaningfulScalars.isEmpty else { return true }
+
+    let textual = CharacterSet.letters.union(.decimalDigits)
+    let textualCount = meaningfulScalars.reduce(into: 0) { count, scalar in
+        if textual.contains(scalar) { count += 1 }
+    }
+
+    guard textualCount > 0 else { return true }
+
+    // When PDFKit returns mostly punctuation/graphics characters (common with tables that render
+    // via vector art) we treat the page as image-like and prefer OCR. Requiring a modest number of
+    // scalars avoids incorrectly flagging legitimately short captions or headings.
+    if meaningfulScalars.count >= 64 {
+        let density = Double(textualCount) / Double(meaningfulScalars.count)
+        if density < 0.1 { return true }
+    }
+
+    return false
+}
+
 public struct PDFDocumentLoader: DocumentLoader {
     public init() {}
+
+    public func supports(_ input: IngestInput) -> Bool {
+        if case .pdf = input {
+            return true
+        }
+        return false
+    }
 
     public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .pdf(url) = input, let doc = PDFDocument(url: url) else {
@@ -27,7 +64,7 @@ public struct PDFDocumentLoader: DocumentLoader {
 
             var text = extractText(from: page)
 
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if needsOCR(forExtractedText: text) {
                 #if canImport(Vision)
                 if #available(iOS 13.0, macOS 10.15, *) {
                     text = (try? performOCR(on: page)) ?? text
@@ -107,6 +144,13 @@ public struct PDFDocumentLoader: DocumentLoader {
 public struct TextDocumentLoader: DocumentLoader {
     public init() {}
 
+    public func supports(_ input: IngestInput) -> Bool {
+        if case .text = input {
+            return true
+        }
+        return false
+    }
+
     public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .text(s, name) = input else {
             throw NSError(domain: "Folio", code: 402, userInfo: [NSLocalizedDescriptionKey: "Not text"])
@@ -160,6 +204,10 @@ private func normalize(_ s: String) -> String {
 
     let allowed: Set<UnicodeScalar> = ["\n", "\t"]
     let view = normalized.unicodeScalars.compactMap { scalar -> UnicodeScalar? in
+        if placeholderGlyphScalars.contains(scalar) {
+            return nil
+        }
+
         if CharacterSet.controlCharacters.contains(scalar) {
             return allowed.contains(scalar) ? scalar : nil
         }
