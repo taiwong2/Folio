@@ -56,4 +56,30 @@ final class FolioSmokeTests: XCTestCase {
         XCTAssertFalse(source.importedAt.isEmpty)
         XCTAssertFalse(source.updatedAt.isEmpty)
     }
+
+    func testMarkdownIngestStoresHeadingCitations() throws {
+        let folio = try FolioEngine.inMemory()
+        let markdown = """
+        # Guide
+
+        Intro text.
+
+        ## Installation
+
+        Use retrieval carefully for cited passages.
+        """
+        let data = try XCTUnwrap(markdown.data(using: .utf8))
+
+        _ = try folio.ingest(.data(data, uti: "public.markdown", name: "guide.md"), sourceId: "guide")
+
+        let source = try XCTUnwrap(folio.listSources().first { $0.id == "guide" })
+        XCTAssertEqual(source.fileType, "markdown")
+        XCTAssertEqual(source.uti, "public.markdown")
+
+        let passages = try folio.searchWithContext("retrieval", in: "guide", limit: 1, expand: 0)
+        let passage = try XCTUnwrap(passages.first)
+        XCTAssertEqual(passage.citations.first?.sourceName, "guide.md")
+        XCTAssertEqual(passage.citations.first?.sectionTitle, "Installation")
+        XCTAssertFalse(passage.citations.first?.chunkId.isEmpty ?? true)
+    }
 }

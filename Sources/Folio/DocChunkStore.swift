@@ -35,7 +35,9 @@ extension DocChunkStore {
         public let rowid: Int64
         public let chunkId: String
         public let sourceId: String
+        public let sourceDisplayName: String
         public let page: Int?
+        public let sectionTitle: String?
         public let excerpt: String
         public let bm25: Double
     }
@@ -45,6 +47,7 @@ extension DocChunkStore {
         public let chunkId: String
         public let text: String
         public let page: Int?
+        public let sectionTitle: String?
     }
 
     public struct VectorRow: Sendable {
@@ -60,13 +63,13 @@ extension DocChunkStore {
         public let sourceId: String
         public let page: Int?
         public let text: String
-        public let prefix: String
+        public let contextPrefix: String
         public let ftsContent: String
 
         public var embeddingText: String {
             if !ftsContent.isEmpty { return ftsContent }
-            if prefix.isEmpty { return text }
-            return prefix + text
+            if contextPrefix.isEmpty { return text }
+            return contextPrefix + text
         }
     }
 
@@ -117,14 +120,17 @@ extension DocChunkStore {
               d.rowid AS rowid,
               d.id AS chunk_id,
               d.source_id AS source_id,
+              s.display_name AS source_display_name,
               d.page AS page,
+              d.section_title AS section_title,
               REPLACE(
                 snippet(doc_chunks_fts, 0, '', '', '…', 18),
-                COALESCE(d.section_title || ' ', ''),
+                COALESCE(d.context_prefix || ' ', ''),
                 ''
               ) AS excerpt,
               bm25(doc_chunks_fts) AS score
             FROM doc_chunks AS d
+            JOIN sources AS s ON s.id = d.source_id
             JOIN doc_chunks_fts ON doc_chunks_fts.rowid = d.rowid
             WHERE doc_chunks_fts MATCH ?
             """
@@ -144,7 +150,9 @@ extension DocChunkStore {
                     rowid: $0["rowid"],
                     chunkId: $0["chunk_id"],
                     sourceId: $0["source_id"],
+                    sourceDisplayName: $0["source_display_name"],
                     page: $0["page"],
+                    sectionTitle: $0["section_title"],
                     excerpt: $0["excerpt"],
                     bm25: $0["score"]
                 )
@@ -155,7 +163,7 @@ extension DocChunkStore {
     func fetchNeighbors(sourceId: String, around rowid: Int64, expand: Int) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let prevRows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page
+                SELECT rowid, id AS chunk_id, content, page, section_title
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid < ?
                 ORDER BY rowid DESC
@@ -163,7 +171,7 @@ extension DocChunkStore {
             """, arguments: [sourceId, rowid, expand]).reversed()
 
             let nextRows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page
+                SELECT rowid, id AS chunk_id, content, page, section_title
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid >= ?
                 ORDER BY rowid ASC
@@ -171,7 +179,7 @@ extension DocChunkStore {
             """, arguments: [sourceId, rowid, expand + 1])
 
             let toChunk: (Row) -> NeighborChunk = { r in
-                NeighborChunk(rowid: r["rowid"], chunkId: r["chunk_id"], text: r["content"], page: r["page"])
+                NeighborChunk(rowid: r["rowid"], chunkId: r["chunk_id"], text: r["content"], page: r["page"], sectionTitle: r["section_title"])
             }
             return prevRows.map(toChunk) + nextRows.map(toChunk)
         }
@@ -180,7 +188,7 @@ extension DocChunkStore {
     func fetchAllChunks(forSourceId sourceId: String) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let rows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page
+                SELECT rowid, id AS chunk_id, content, page, section_title
                 FROM doc_chunks
                 WHERE source_id = ?
                 ORDER BY rowid ASC
@@ -191,7 +199,8 @@ extension DocChunkStore {
                     rowid: row["rowid"],
                     chunkId: row["chunk_id"],
                     text: row["content"],
-                    page: row["page"]
+                    page: row["page"],
+                    sectionTitle: row["section_title"]
                 )
             }
         }
@@ -214,7 +223,7 @@ extension DocChunkStore {
             }
 
             let rows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page
+                SELECT rowid, id AS chunk_id, content, page, section_title
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid >= ?
                 ORDER BY rowid ASC
@@ -225,7 +234,8 @@ extension DocChunkStore {
                     rowid: row["rowid"],
                     chunkId: row["chunk_id"],
                     text: row["content"],
-                    page: row["page"]
+                    page: row["page"],
+                    sectionTitle: row["section_title"]
                 )
             }
         }
@@ -259,6 +269,7 @@ extension DocChunkStore {
         page: Int?,
         content: String,
         sectionTitle: String? = nil,
+        contextPrefix: String? = nil,
         parentId: String? = nil,
         contentHash: String? = nil,
         ftsContent: String? = nil
@@ -268,9 +279,9 @@ extension DocChunkStore {
             let id = chunkId ?? self.deterministicChunkId(sourceId: sourceId, ordinal: ordinal, contentHash: hash)
 
             try db.execute(sql: """
-              INSERT INTO doc_chunks (id, source_id, ordinal, page, content, section_title, parent_id, content_hash)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, arguments: [id, sourceId, ordinal, page, content, sectionTitle, parentId, hash])
+              INSERT INTO doc_chunks (id, source_id, ordinal, page, content, section_title, context_prefix, parent_id, content_hash)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [id, sourceId, ordinal, page, content, sectionTitle, contextPrefix, parentId, hash])
 
             try db.execute(sql: """
               INSERT INTO doc_chunks_fts(rowid, content, source_id, section_title)
@@ -334,6 +345,7 @@ extension DocChunkStore {
                   d.page,
                   d.content,
                   COALESCE(d.section_title, '') AS section_title,
+                  COALESCE(d.context_prefix, '') AS context_prefix,
                   f.content AS fts_content
                 FROM doc_chunks AS d
                 JOIN doc_chunks_fts AS f ON f.rowid = d.rowid
@@ -358,7 +370,7 @@ extension DocChunkStore {
                     sourceId: row["source_id"],
                     page: row["page"],
                     text: row["content"],
-                    prefix: row["section_title"] ?? "",
+                    contextPrefix: row["context_prefix"] ?? "",
                     ftsContent: row["fts_content"] ?? row["content"]
                 )
             }
@@ -379,6 +391,7 @@ internal struct DocChunkStore {
         page: Int?,
         content: String,
         sectionTitle: String? = nil,
+        contextPrefix: String? = nil,
         parentId: String? = nil,
         contentHash: String? = nil,
         ftsContent: String? = nil
@@ -387,9 +400,9 @@ internal struct DocChunkStore {
             let hash = contentHash ?? self.contentHash(for: content)
             let id = chunkId ?? self.deterministicChunkId(sourceId: sourceId, ordinal: ordinal, contentHash: hash)
             try db.execute(sql: """
-              INSERT INTO doc_chunks (id, source_id, ordinal, page, content, section_title, parent_id, content_hash)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, arguments: [id, sourceId, ordinal, page, content, sectionTitle, parentId, hash])
+              INSERT INTO doc_chunks (id, source_id, ordinal, page, content, section_title, context_prefix, parent_id, content_hash)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [id, sourceId, ordinal, page, content, sectionTitle, contextPrefix, parentId, hash])
 
             try db.execute(sql: """
               INSERT INTO doc_chunks_fts(rowid, content, source_id, section_title)

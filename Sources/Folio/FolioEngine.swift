@@ -16,7 +16,8 @@ public func mapPassagesToResults(_ passages: [RetrievedPassage], scoreFromBM25: 
             text: p.text,
             bm25: p.bm25,
             cosine: nil,
-            score: scoreFromBM25(p.bm25)
+            score: scoreFromBM25(p.bm25),
+            citations: p.citations
         )
     }
 }
@@ -40,6 +41,7 @@ public struct RetrievedPassage {
     public let excerpt: String
     public let text: String
     public let bm25: Double
+    public let citations: [Citation]
 }
 
 public struct RetrievedResult: Sendable {
@@ -50,6 +52,15 @@ public struct RetrievedResult: Sendable {
     public let bm25: Double
     public let cosine: Double?
     public let score: Double
+    public let citations: [Citation]
+}
+
+public struct Citation: Sendable, Hashable, Codable {
+    public let sourceId: String
+    public let sourceName: String
+    public let page: Int?
+    public let sectionTitle: String?
+    public let chunkId: String
 }
 
 public struct DocumentFetch: Sendable {
@@ -70,7 +81,7 @@ public final class FolioEngine {
 
     public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
-        let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: embedder)
@@ -79,14 +90,14 @@ public final class FolioEngine {
 
     public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
-        let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: embedder)
     }
 
     public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws -> FolioEngine {
-        let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
         return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embedder: embedder)
@@ -142,7 +153,8 @@ public final class FolioEngine {
                 ordinal: c.ordinal,
                 page: c.page,
                 content: c.text,
-                sectionTitle: prefix,
+                sectionTitle: c.sectionTitle,
+                contextPrefix: prefix,
                 parentId: c.parentId,
                 contentHash: c.contentHash,
                 ftsContent: augmented
@@ -223,7 +235,8 @@ public final class FolioEngine {
                 ordinal: c.ordinal,
                 page: c.page,
                 content: c.text,
-                sectionTitle: prefix,
+                sectionTitle: c.sectionTitle,
+                contextPrefix: prefix,
                 parentId: c.parentId,
                 contentHash: c.contentHash,
                 ftsContent: augmented
@@ -270,8 +283,17 @@ public final class FolioEngine {
             
             let mergedText = window.map(\.text).joined(separator: "\n\n")
             let startPage = window.first?.page
+            let citations = window.map {
+                Citation(
+                    sourceId: h.sourceId,
+                    sourceName: h.sourceDisplayName,
+                    page: $0.page,
+                    sectionTitle: $0.sectionTitle,
+                    chunkId: $0.chunkId
+                )
+            }
             
-            results.append(RetrievedPassage(sourceId: h.sourceId, startPage: startPage, excerpt: h.excerpt, text: mergedText, bm25: h.bm25))
+            results.append(RetrievedPassage(sourceId: h.sourceId, startPage: startPage, excerpt: h.excerpt, text: mergedText, bm25: h.bm25, citations: citations))
             if results.count >= limit { break }
 
         }
@@ -415,7 +437,16 @@ public final class FolioEngine {
             }
             
             window.forEach { used.insert($0.rowid) }
-            out.append(.init(sourceId: c.h.sourceId, startPage: window.first?.page, excerpt: c.h.excerpt, text: window.map(\.text).joined(separator: "\n\n"), bm25: c.h.bm25, cosine: c.cos, score: c.fused))
+            let citations = window.map {
+                Citation(
+                    sourceId: c.h.sourceId,
+                    sourceName: c.h.sourceDisplayName,
+                    page: $0.page,
+                    sectionTitle: $0.sectionTitle,
+                    chunkId: $0.chunkId
+                )
+            }
+            out.append(.init(sourceId: c.h.sourceId, startPage: window.first?.page, excerpt: c.h.excerpt, text: window.map(\.text).joined(separator: "\n\n"), bm25: c.h.bm25, cosine: c.cos, score: c.fused, citations: citations))
             
             if out.count >= limit {
                 break
@@ -471,7 +502,7 @@ private struct SourceMetadata {
 private func sourceMetadata(for input: IngestInput, document: LoadedDocument) -> SourceMetadata {
     switch input {
     case .pdf(let url):
-        SourceMetadata(
+        return SourceMetadata(
             filePath: url.path,
             displayName: document.name,
             url: url.absoluteString,
@@ -479,7 +510,7 @@ private func sourceMetadata(for input: IngestInput, document: LoadedDocument) ->
             fileType: "pdf"
         )
     case .text(_, let name):
-        SourceMetadata(
+        return SourceMetadata(
             filePath: name ?? document.name,
             displayName: document.name,
             url: nil,
@@ -487,13 +518,24 @@ private func sourceMetadata(for input: IngestInput, document: LoadedDocument) ->
             fileType: "text"
         )
     case .data(_, let uti, let name):
-        SourceMetadata(
+        let fileType: String
+        if isMarkdownUTI(uti) {
+            fileType = "markdown"
+        } else {
+            fileType = uti.split(separator: ".").last.map(String.init) ?? "data"
+        }
+
+        return SourceMetadata(
             filePath: name ?? document.name,
             displayName: document.name,
             url: nil,
             uti: uti,
-            fileType: uti.split(separator: ".").last.map(String.init)
+            fileType: fileType
         )
     }
 }
 
+private func isMarkdownUTI(_ uti: String) -> Bool {
+    let normalized = uti.lowercased()
+    return normalized == "net.daringfireball.markdown" || normalized == "public.markdown" || normalized == "public.md"
+}

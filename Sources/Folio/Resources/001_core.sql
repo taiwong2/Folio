@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
   page INTEGER,
   content TEXT NOT NULL,
   section_title TEXT,
+  context_prefix TEXT,
   parent_id TEXT,
   content_hash TEXT NOT NULL,
   FOREIGN KEY(source_id) REFERENCES sources(id)

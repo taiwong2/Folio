@@ -18,34 +18,89 @@ public struct UniversalChunker: Chunker {
         var out: [Chunk] = []
         var ordinal = 0
         for page in doc.pages {
-            let units = chooseUnits(page.text)
-            var buf = ""
-            func flush() {
-                let trimmed = buf.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    out.append(Chunk(sourceId: sourceId, page: page.index, text: trimmed, ordinal: ordinal))
-                    ordinal += 1
-                }
+            let sections = markdownSections(in: page.text)
+            let pageSections = sections.isEmpty ? [(title: String?.none, text: page.text)] : sections
 
-                buf.removeAll(keepingCapacity: true)
-            }
-            for u in units {
-                if buf.isEmpty { buf = u; continue }
-                if (buf.count + 1 + u.count) > maxChars {
-                    flush()
-                    if overlapChars > 0, let last = out.last {
-                        let carry = String(last.text.suffix(overlapChars))
-                        buf = (carry.isEmpty ? "" : carry + "\n") + u
-                        if buf.count > maxChars { buf = u }
-                    } else { buf = u }
-                } else {
-                    buf += (looksTableish(page.text) ? "\n" : " ") + u
+            for section in pageSections {
+                let units = chooseUnits(section.text)
+                var buf = ""
+                func flush() {
+                    let trimmed = buf.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        out.append(Chunk(sourceId: sourceId, page: page.index, text: trimmed, ordinal: ordinal, sectionTitle: section.title))
+                        ordinal += 1
+                    }
+
+                    buf.removeAll(keepingCapacity: true)
                 }
+                for u in units {
+                    if buf.isEmpty { buf = u; continue }
+                    if (buf.count + 1 + u.count) > maxChars {
+                        flush()
+                        if overlapChars > 0, let last = out.last {
+                            let carry = String(last.text.suffix(overlapChars))
+                            buf = (carry.isEmpty ? "" : carry + "\n") + u
+                            if buf.count > maxChars { buf = u }
+                        } else { buf = u }
+                    } else {
+                        buf += (looksTableish(section.text) ? "\n" : " ") + u
+                    }
+                }
+                if !buf.isEmpty { flush() }
             }
-            if !buf.isEmpty { flush() }
         }
         return out
     }
+}
+
+private func markdownSections(in text: String) -> [(title: String?, text: String)] {
+    let lines = text.components(separatedBy: .newlines)
+    var sections: [(title: String?, text: String)] = []
+    var currentTitle: String?
+    var currentLines: [String] = []
+    var sawHeading = false
+
+    func flush() {
+        let body = currentLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !body.isEmpty {
+            sections.append((title: currentTitle, text: body))
+        }
+        currentLines.removeAll(keepingCapacity: true)
+    }
+
+    for line in lines {
+        if let heading = markdownHeadingTitle(line) {
+            sawHeading = true
+            flush()
+            currentTitle = heading
+        } else {
+            currentLines.append(line)
+        }
+    }
+
+    flush()
+    return sawHeading ? sections : []
+}
+
+private func markdownHeadingTitle(_ line: String) -> String? {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    guard trimmed.hasPrefix("#") else { return nil }
+
+    var markerCount = 0
+    for character in trimmed {
+        if character == "#" {
+            markerCount += 1
+        } else {
+            break
+        }
+    }
+
+    guard (1...6).contains(markerCount) else { return nil }
+    let afterMarkers = trimmed.dropFirst(markerCount)
+    guard afterMarkers.first == " " else { return nil }
+
+    let title = afterMarkers.trimmingCharacters(in: .whitespaces)
+    return title.isEmpty ? nil : title
 }
 
 private func chooseUnits(_ text: String) -> [String] {
