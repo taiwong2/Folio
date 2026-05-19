@@ -26,4 +26,34 @@ final class FolioSmokeTests: XCTestCase {
         let client = OpenAIStyleClient()
         XCTAssertEqual(client.chatCompletionsURL.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
     }
+
+    func testReingestingSameSourceKeepsStableChunkIds() throws {
+        let folio = try FolioEngine.inMemory()
+        let text = "First paragraph about stable chunks. Second paragraph about citations."
+
+        _ = try folio.ingest(.text(text, name: "note.txt"), sourceId: "stable")
+        let first = try folio.fetchDocument(sourceId: "stable")
+
+        _ = try folio.ingest(.text(text, name: "note.txt"), sourceId: "stable")
+        let second = try folio.fetchDocument(sourceId: "stable")
+
+        XCTAssertFalse(first.chunkIds.isEmpty)
+        XCTAssertEqual(first.chunkIds, second.chunkIds)
+    }
+
+    func testTextSourceStoresV1Metadata() throws {
+        let folio = try FolioEngine.inMemory()
+
+        _ = try folio.ingest(.text("metadata matters", name: "note.txt"), sourceId: "meta")
+
+        let source = try XCTUnwrap(folio.listSources().first { $0.id == "meta" })
+        XCTAssertEqual(source.displayName, "note.txt")
+        XCTAssertEqual(source.filePath, "note.txt")
+        XCTAssertEqual(source.uti, "public.plain-text")
+        XCTAssertEqual(source.fileType, "text")
+        XCTAssertEqual(source.pages, 1)
+        XCTAssertEqual(source.chunks, 1)
+        XCTAssertFalse(source.importedAt.isEmpty)
+        XCTAssertFalse(source.updatedAt.isEmpty)
+    }
 }

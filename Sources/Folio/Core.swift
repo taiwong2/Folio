@@ -10,13 +10,28 @@ import Foundation
 
 ///Common Data Types
 public struct Chunk: Sendable, Hashable {
-    public let id: String
+    public let id: String?
     public let sourceId: String
     public let page: Int?
     public let text: String
     public let tags: Set<String>
-    public init(id: String = UUID().uuidString, sourceId: String, page: Int?, text: String, tags: Set<String> = []) {
-        self.id = id; self.sourceId = sourceId; self.page = page; self.text = text; self.tags = tags
+    public let ordinal: Int
+    public let sectionTitle: String?
+    public let parentId: String?
+    public let contentHash: String?
+    
+    public init(
+        id: String? = nil,
+        sourceId: String,
+        page: Int?,
+        text: String,
+        tags: Set<String> = [],
+        ordinal: Int = 0,
+        sectionTitle: String? = nil,
+        parentId: String? = nil,
+        contentHash: String? = nil
+    ) {
+        self.id = id; self.sourceId = sourceId; self.page = page; self.text = text; self.tags = tags; self.ordinal = ordinal; self.sectionTitle = sectionTitle; self.parentId = parentId; self.contentHash = contentHash
     }
 }
 
@@ -62,4 +77,3 @@ public protocol DocumentLoader {
 public protocol Chunker {
     func chunk(sourceId: String, doc: LoadedDocument, config: ChunkingConfig) throws -> [Chunk]
 }
-

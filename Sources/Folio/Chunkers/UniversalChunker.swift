@@ -16,12 +16,17 @@ public struct UniversalChunker: Chunker {
         let overlapChars = max(0, Int(Double(config.overlapTokens) * 3.6))
 
         var out: [Chunk] = []
+        var ordinal = 0
         for page in doc.pages {
             let units = chooseUnits(page.text)
             var buf = ""
             func flush() {
                 let trimmed = buf.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { out.append(Chunk(sourceId: sourceId, page: page.index, text: trimmed)) }
+                if !trimmed.isEmpty {
+                    out.append(Chunk(sourceId: sourceId, page: page.index, text: trimmed, ordinal: ordinal))
+                    ordinal += 1
+                }
+
                 buf.removeAll(keepingCapacity: true)
             }
             for u in units {

@@ -23,6 +23,10 @@ public struct Source: Equatable, Hashable, Codable {
     public let pages: Int?
     public let chunks: Int
     public let importedAt: String
+    public let url: String?
+    public let uti: String?
+    public let fileType: String?
+    public let updatedAt: String
 }
 
 extension DocChunkStore {
@@ -69,6 +73,16 @@ extension DocChunkStore {
     public struct ChunkIdentifier: Sendable, Hashable {
         public let rowid: Int64
         public let chunkId: String
+    }
+    
+    func contentHash(for content: String) -> String {
+        let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    func deterministicChunkId(sourceId: String, ordinal: Int, contentHash: String) -> String {
+        "\(sourceId):\(ordinal):\(String(contentHash.prefix(16)))"
     }
     
     func cacheKey(sourceId: String, page: Int?, chunk:String) -> String {
@@ -238,14 +252,25 @@ extension DocChunkStore {
         }
     }
 
-    func insertReturningIdentifiers(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws -> ChunkIdentifier {
+    func insertReturningIdentifiers(
+        chunkId: String? = nil,
+        sourceId: String,
+        ordinal: Int,
+        page: Int?,
+        content: String,
+        sectionTitle: String? = nil,
+        parentId: String? = nil,
+        contentHash: String? = nil,
+        ftsContent: String? = nil
+    ) throws -> ChunkIdentifier {
         try dbQueue.write { db in
-            let id = UUID().uuidString
+            let hash = contentHash ?? self.contentHash(for: content)
+            let id = chunkId ?? self.deterministicChunkId(sourceId: sourceId, ordinal: ordinal, contentHash: hash)
 
             try db.execute(sql: """
-              INSERT INTO doc_chunks (id, source_id, page, content, section_title)
-              VALUES (?, ?, ?, ?, ?)
-            """, arguments: [id, sourceId, page, content, sectionTitle])
+              INSERT INTO doc_chunks (id, source_id, ordinal, page, content, section_title, parent_id, content_hash)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [id, sourceId, ordinal, page, content, sectionTitle, parentId, hash])
 
             try db.execute(sql: """
               INSERT INTO doc_chunks_fts(rowid, content, source_id, section_title)
@@ -347,13 +372,24 @@ internal struct DocChunkStore {
     let dbQueue: DatabaseQueue
     init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
 
-    func insert(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws {
+    func insert(
+        chunkId: String? = nil,
+        sourceId: String,
+        ordinal: Int,
+        page: Int?,
+        content: String,
+        sectionTitle: String? = nil,
+        parentId: String? = nil,
+        contentHash: String? = nil,
+        ftsContent: String? = nil
+    ) throws {
         try dbQueue.write { db in
-            let id = UUID().uuidString
+            let hash = contentHash ?? self.contentHash(for: content)
+            let id = chunkId ?? self.deterministicChunkId(sourceId: sourceId, ordinal: ordinal, contentHash: hash)
             try db.execute(sql: """
-              INSERT INTO doc_chunks (id, source_id, page, content, section_title)
-              VALUES (?, ?, ?, ?, ?)
-            """, arguments: [id, sourceId, page, content, sectionTitle])
+              INSERT INTO doc_chunks (id, source_id, ordinal, page, content, section_title, parent_id, content_hash)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [id, sourceId, ordinal, page, content, sectionTitle, parentId, hash])
 
             try db.execute(sql: """
               INSERT INTO doc_chunks_fts(rowid, content, source_id, section_title)
@@ -397,31 +433,45 @@ internal struct DocChunkStore {
     }
 
 
-    func upsertSource(id: String, filePath: String, displayName: String, pages: Int?, chunks: Int) throws {
+    func upsertSource(
+        id: String,
+        filePath: String,
+        displayName: String,
+        url: String? = nil,
+        uti: String? = nil,
+        fileType: String? = nil,
+        pages: Int?,
+        chunks: Int
+    ) throws {
         try dbQueue.write { db in
             try db.execute(sql: """
-              INSERT INTO sources (id, file_path, display_name, pages, chunks, imported_at)
-              VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+              INSERT INTO sources (id, file_path, display_name, url, uti, file_type, pages, chunks, imported_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
               ON CONFLICT(id) DO UPDATE SET
                 file_path=excluded.file_path,
                 display_name=excluded.display_name,
+                url=excluded.url,
+                uti=excluded.uti,
+                file_type=excluded.file_type,
                 pages=excluded.pages,
                 chunks=excluded.chunks,
-                imported_at=excluded.imported_at
-            """, arguments: [id, filePath, displayName, pages, chunks])
+                updated_at=excluded.updated_at
+            """, arguments: [id, filePath, displayName, url, uti, fileType, pages, chunks])
         }
     }
 
     func listSources() throws -> [Source] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: """
-              SELECT id, file_path, display_name, pages, chunks,
-                     COALESCE(imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS imported_at
+              SELECT id, file_path, display_name, url, uti, file_type, pages, chunks,
+                     COALESCE(imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS imported_at,
+                     COALESCE(updated_at, imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS updated_at
               FROM sources ORDER BY imported_at DESC
             """).map { row in
                 Source(
                     id: row["id"], filePath: row["file_path"], displayName: row["display_name"],
-                    pages: row["pages"], chunks: row["chunks"], importedAt: row["imported_at"]
+                    pages: row["pages"], chunks: row["chunks"], importedAt: row["imported_at"],
+                    url: row["url"], uti: row["uti"], fileType: row["file_type"], updatedAt: row["updated_at"]
                 )
             }
         }
@@ -432,8 +482,9 @@ internal struct DocChunkStore {
             try Row.fetchOne(
                 db,
                 sql: """
-                    SELECT id, file_path, display_name, pages, chunks,
-                           COALESCE(imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS imported_at
+                    SELECT id, file_path, display_name, url, uti, file_type, pages, chunks,
+                           COALESCE(imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS imported_at,
+                           COALESCE(updated_at, imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS updated_at
                     FROM sources
                     WHERE id = ?
                     LIMIT 1
@@ -446,7 +497,11 @@ internal struct DocChunkStore {
                     displayName: row["display_name"],
                     pages: row["pages"],
                     chunks: row["chunks"],
-                    importedAt: row["imported_at"]
+                    importedAt: row["imported_at"],
+                    url: row["url"],
+                    uti: row["uti"],
+                    fileType: row["file_type"],
+                    updatedAt: row["updated_at"]
                 )
             }
         }
@@ -461,7 +516,7 @@ internal struct DocChunkStore {
 
     func deleteSource(id base: String) throws {
         try dbQueue.write { db in
-            try db.execute(sql: "DELETE FROM doc_chunks WHERE source_id LIKE ?", arguments: ["\(base) p.%"])
+            try db.execute(sql: "DELETE FROM doc_chunks WHERE source_id = ? OR source_id LIKE ?", arguments: [base, "\(base) p.%"])
             try db.execute(sql: "DELETE FROM sources WHERE id = ?", arguments: [base])
             try db.execute(sql: "INSERT INTO doc_chunks_fts(doc_chunks_fts) VALUES('rebuild')")
         }

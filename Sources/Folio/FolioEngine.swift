@@ -111,9 +111,19 @@ public final class FolioEngine {
         
         let doc = try loader.load(input)
         let cleaned = HeaderFooterFilter.strip(doc)
+        let metadata = sourceMetadata(for: input, document: doc)
 
         try? store.deleteChunks(forSourceId: sourceId)
-        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: 0)
+        try? store.upsertSource(
+            id: sourceId,
+            filePath: metadata.filePath,
+            displayName: metadata.displayName,
+            url: metadata.url,
+            uti: metadata.uti,
+            fileType: metadata.fileType,
+            pages: doc.pages.count,
+            chunks: 0
+        )
 
         let pieces = try chunker.chunk(sourceId: sourceId, doc: cleaned, config: config.chunking)
 
@@ -126,12 +136,31 @@ public final class FolioEngine {
             
             let augmented = prefix + c.text
             
-            try store.insert(sourceId: c.sourceId, page: c.page, content: c.text, sectionTitle: prefix, ftsContent: augmented)
+            try store.insert(
+                chunkId: c.id,
+                sourceId: c.sourceId,
+                ordinal: c.ordinal,
+                page: c.page,
+                content: c.text,
+                sectionTitle: prefix,
+                parentId: c.parentId,
+                contentHash: c.contentHash,
+                ftsContent: augmented
+            )
             
             inserted += 1
         }
 
-        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: inserted)
+        try? store.upsertSource(
+            id: sourceId,
+            filePath: metadata.filePath,
+            displayName: metadata.displayName,
+            url: metadata.url,
+            uti: metadata.uti,
+            fileType: metadata.fileType,
+            pages: doc.pages.count,
+            chunks: inserted
+        )
 
         return (doc.pages.count, inserted)
     }
@@ -146,9 +175,19 @@ public final class FolioEngine {
         
         let doc = try loader.load(input)
         let cleaned = HeaderFooterFilter.strip(doc)
+        let metadata = sourceMetadata(for: input, document: doc)
         
         try? store.deleteChunks(forSourceId: sourceId)
-        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: 0)
+        try? store.upsertSource(
+            id: sourceId,
+            filePath: metadata.filePath,
+            displayName: metadata.displayName,
+            url: metadata.url,
+            uti: metadata.uti,
+            fileType: metadata.fileType,
+            pages: doc.pages.count,
+            chunks: 0
+        )
 
         let pieces = try chunker.chunk(sourceId: sourceId, doc: cleaned, config: config.chunking)
         var inserted = 0
@@ -179,10 +218,14 @@ public final class FolioEngine {
 
             let augmented = prefix + c.text
             let newChunk = try store.insertReturningIdentifiers(
+                chunkId: c.id,
                 sourceId: c.sourceId,
+                ordinal: c.ordinal,
                 page: c.page,
                 content: c.text,
                 sectionTitle: prefix,
+                parentId: c.parentId,
+                contentHash: c.contentHash,
                 ftsContent: augmented
             )
 
@@ -194,7 +237,16 @@ public final class FolioEngine {
             }
         }
 
-        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: inserted)
+        try? store.upsertSource(
+            id: sourceId,
+            filePath: metadata.filePath,
+            displayName: metadata.displayName,
+            url: metadata.url,
+            uti: metadata.uti,
+            fileType: metadata.fileType,
+            pages: doc.pages.count,
+            chunks: inserted
+        )
         return (doc.pages.count, inserted)
     }
     
@@ -408,4 +460,40 @@ public final class FolioEngine {
     }
 }
 
+private struct SourceMetadata {
+    let filePath: String
+    let displayName: String
+    let url: String?
+    let uti: String?
+    let fileType: String?
+}
+
+private func sourceMetadata(for input: IngestInput, document: LoadedDocument) -> SourceMetadata {
+    switch input {
+    case .pdf(let url):
+        SourceMetadata(
+            filePath: url.path,
+            displayName: document.name,
+            url: url.absoluteString,
+            uti: "com.adobe.pdf",
+            fileType: "pdf"
+        )
+    case .text(_, let name):
+        SourceMetadata(
+            filePath: name ?? document.name,
+            displayName: document.name,
+            url: nil,
+            uti: "public.plain-text",
+            fileType: "text"
+        )
+    case .data(_, let uti, let name):
+        SourceMetadata(
+            filePath: name ?? document.name,
+            displayName: document.name,
+            url: nil,
+            uti: uti,
+            fileType: uti.split(separator: ".").last.map(String.init)
+        )
+    }
+}
 
