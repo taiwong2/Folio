@@ -308,29 +308,66 @@ extension DocChunkStore {
         }
     }
 
-    func insertVector(chunkId: String, dim: Int, vector: [Float]) throws {
-        let data = vector.withUnsafeBufferPointer { Data(buffer: $0) }
+    func upsertEmbeddingIndex(id: String, model: EmbeddingModelInfo) throws {
         try dbQueue.write { db in
             try db.execute(sql: """
-              INSERT INTO doc_chunk_vectors(chunk_id, dim, vec) VALUES (?, ?, ?)
-              ON CONFLICT(chunk_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec
-            """, arguments: [chunkId, dim, data])
+                INSERT INTO embedding_indexes(id, model_id, dimension) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    model_id = excluded.model_id,
+                    dimension = excluded.dimension,
+                    updated_at = CURRENT_TIMESTAMP
+            """, arguments: [id, model.id, model.dimension])
         }
     }
 
-    func fetchVectors(forRowids rowids: [Int64]) throws -> [VectorRow] {
+    func fetchEmbeddingIndex(id: String) throws -> EmbeddingModelInfo? {
+        try dbQueue.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT model_id, dimension FROM embedding_indexes WHERE id = ?",
+                arguments: [id]
+            ) else { return nil }
+            return EmbeddingModelInfo(id: row["model_id"], dimension: row["dimension"])
+        }
+    }
+
+    func insertVector(chunkId: String, indexId: String, model: EmbeddingModelInfo, vector: [Float]) throws {
+        precondition(vector.count == model.dimension,
+            "Vector dimension \(vector.count) does not match model.dimension \(model.dimension)")
+
+        if let stored = try fetchEmbeddingIndex(id: indexId) {
+            guard stored.id == model.id, stored.dimension == model.dimension else {
+                throw NSError(domain: "Folio", code: 530, userInfo: [NSLocalizedDescriptionKey:
+                    "Embedding index '\(indexId)' is registered as model=\(stored.id) dim=\(stored.dimension) but received model=\(model.id) dim=\(model.dimension)"])
+            }
+        } else {
+            try upsertEmbeddingIndex(id: indexId, model: model)
+        }
+
+        let data = vector.withUnsafeBufferPointer { Data(buffer: $0) }
+        try dbQueue.write { db in
+            try db.execute(sql: """
+              INSERT INTO doc_chunk_vectors(chunk_id, index_id, dim, vec) VALUES (?, ?, ?, ?)
+              ON CONFLICT(chunk_id, index_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec
+            """, arguments: [chunkId, indexId, model.dimension, data])
+        }
+    }
+
+    func fetchVectors(forRowids rowids: [Int64], indexId: String) throws -> [VectorRow] {
         guard !rowids.isEmpty else { return [] }
         let placeholders = Array(repeating: "?", count: rowids.count).joined(separator: ",")
         return try dbQueue.read { db in
+            var args: [DatabaseValueConvertible] = rowids.map { $0 as DatabaseValueConvertible }
+            args.append(indexId)
             let rows = try Row.fetchAll(
                 db,
                 sql: """
                     SELECT d.rowid AS rowid, d.id AS chunk_id, v.dim, v.vec
                     FROM doc_chunks AS d
                     JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id
-                    WHERE d.rowid IN (\(placeholders))
+                    WHERE d.rowid IN (\(placeholders)) AND v.index_id = ?
                 """,
-                arguments: StatementArguments(rowids)
+                arguments: StatementArguments(args)
             )
             return rows.map { r in
                 let dim: Int = r["dim"]
@@ -342,7 +379,7 @@ extension DocChunkStore {
         }
     }
 
-    func fetchEmbeddableChunks(for sourceId: String?, limit: Int) throws -> [EmbeddableChunk] {
+    func fetchEmbeddableChunks(for sourceId: String?, indexId: String, limit: Int) throws -> [EmbeddableChunk] {
         guard limit > 0 else { return [] }
         return try dbQueue.read { db in
             var sql = """
@@ -357,10 +394,10 @@ extension DocChunkStore {
                   f.content AS fts_content
                 FROM doc_chunks AS d
                 JOIN doc_chunks_fts AS f ON f.rowid = d.rowid
-                LEFT JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id
+                LEFT JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id AND v.index_id = ?
                 WHERE v.chunk_id IS NULL
             """
-            var args: [DatabaseValueConvertible] = []
+            var args: [DatabaseValueConvertible] = [indexId]
 
             if let sourceId {
                 sql += " AND (d.source_id = ? OR d.source_id LIKE ?)"

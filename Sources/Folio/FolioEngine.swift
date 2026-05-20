@@ -88,44 +88,46 @@ public struct DocumentFetch: Sendable {
 }
 
 public final class FolioEngine {
+    public static let defaultIndexId = "default"
+
     private let db: AppDatabase
     private let store:  DocChunkStore
     private let loaders: [DocumentLoader]
     private let chunker: Chunker
-    private let embedder: Embedder?
+    private let embeddingProvider: EmbeddingProvider?
 
-    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws {
+    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: embedder)
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider)
     }
 
 
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws {
+    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: embedder)
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider)
     }
 
-    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws -> FolioEngine {
+    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil) throws -> FolioEngine {
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
-        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embedder: embedder)
+        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider)
     }
-    
-    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embedder: Embedder?) throws {
+
+    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embeddingProvider: EmbeddingProvider?) throws {
         try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        
+
         self.db = try AppDatabase(path: databaseURL.path)
         self.store = DocChunkStore(dbQueue: db.dbQueue)
         self.loaders = loaders
         self.chunker = chunker
-        self.embedder = embedder
+        self.embeddingProvider = embeddingProvider
     }
     
     //Ingest any supported input with caller chosen sourceID
@@ -258,10 +260,14 @@ public final class FolioEngine {
             )
 
             inserted += 1
-            if let embedder {
-                let vec = try embedder.embed(augmented)
-
-                try store.insertVector(chunkId: newChunk.chunkId, dim: vec.count, vector: vec)
+            if let embeddingProvider {
+                let vec = try await embeddingProvider.embed(augmented)
+                try store.insertVector(
+                    chunkId: newChunk.chunkId,
+                    indexId: Self.defaultIndexId,
+                    model: embeddingProvider.model,
+                    vector: vec
+                )
             }
         }
 
@@ -373,38 +379,43 @@ public final class FolioEngine {
     /// - Parameters:
     ///   - sourceId: Optionally scope the work to a specific source hierarchy.
     ///   - batch: The number of chunks to embed per API call.
-    public func backfillEmbeddings(for sourceId: String? = nil, batch: Int = 64) throws {
-        guard let embedder else {
-            throw NSError(domain: "Folio", code: 410, userInfo: [NSLocalizedDescriptionKey: "Embedder not configured"])
+    public func backfillEmbeddings(for sourceId: String? = nil, batch: Int = 64) async throws {
+        guard let embeddingProvider else {
+            throw NSError(domain: "Folio", code: 410, userInfo: [NSLocalizedDescriptionKey: "EmbeddingProvider not configured"])
         }
         precondition(batch > 0, "batch must be positive")
 
         while true {
-            let chunks = try store.fetchEmbeddableChunks(for: sourceId, limit: batch)
+            let chunks = try store.fetchEmbeddableChunks(for: sourceId, indexId: Self.defaultIndexId, limit: batch)
             if chunks.isEmpty { break }
 
             let textsToEmbed = chunks.map(\.embeddingText)
-            let embeddings = try embedder.embedBatch(textsToEmbed)
+            let embeddings = try await embeddingProvider.embedBatch(textsToEmbed)
             guard embeddings.count == chunks.count else {
                 throw NSError(domain: "Folio", code: 411, userInfo: [NSLocalizedDescriptionKey: "Embedding count mismatch"])
             }
 
             for (chunk, vector) in zip(chunks, embeddings) {
-                try store.insertVector(chunkId: chunk.chunkId, dim: vector.count, vector: vector)
+                try store.insertVector(
+                    chunkId: chunk.chunkId,
+                    indexId: Self.defaultIndexId,
+                    model: embeddingProvider.model,
+                    vector: vector
+                )
             }
         }
     }
 
-    public func searchHybrid(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
+    public func searchHybrid(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) async throws -> [RetrievedResult] {
         precondition(limit > 0 && expand >= 0, "invalid params")
-        
+
         let hits = try store.ftsHits(query: query, inSource: sourceId, filter: filter, limit: max(limit * 6, 60))
         if hits.isEmpty { return [] }
-        
+
         var cosByRow: [Int64: Double] = [:]
-        if let embedder {
-            let qv = try embedder.embed(query)
-            let vrows = try store.fetchVectors(forRowids: hits.map { $0.rowid })
+        if let embeddingProvider {
+            let qv = try await embeddingProvider.embed(query)
+            let vrows = try store.fetchVectors(forRowids: hits.map { $0.rowid }, indexId: Self.defaultIndexId)
             
             func cosine(_ a: [Float], _ b: [Float]) -> Double {
                 let n = min(a.count, b.count)
@@ -484,6 +495,12 @@ public final class FolioEngine {
     
     public func deleteSource(_ sourceId: String) throws {
         try store.deleteSource(id: sourceId)
+    }
+
+    /// Returns the model registered for the given embedding index, or `nil` if no vectors
+    /// have been written to that index yet.
+    public func embeddingIndexInfo(id: String = FolioEngine.defaultIndexId) throws -> EmbeddingModelInfo? {
+        try store.fetchEmbeddingIndex(id: id)
     }
     
     public func listSources() throws -> [Source] {

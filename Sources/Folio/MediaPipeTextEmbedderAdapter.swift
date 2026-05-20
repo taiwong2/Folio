@@ -2,35 +2,52 @@
 import Foundation
 import MediaPipeTasksText
 
-/// Adapter that bridges MediaPipe's `TextEmbedder` to Folio's `Embedder` protocol.
+/// Adapter that bridges MediaPipe's `TextEmbedder` to Folio's `EmbeddingProvider` protocol.
 ///
 /// This makes it easy to plug on-device Embedding Gemma models (distributed as
 /// MediaPipe text embedders) directly into Folio's ingestion and hybrid search
 /// pipeline.
-public final class MediaPipeTextEmbedderAdapter: Embedder {
+public final class MediaPipeTextEmbedderAdapter: EmbeddingProvider {
+    public let model: EmbeddingModelInfo
     private let embedder: TextEmbedder
     private let queue: DispatchQueue
 
     /// Creates an adapter around a configured MediaPipe `TextEmbedder` instance.
-    /// - Parameter embedder: The underlying MediaPipe text embedder to delegate to.
-    /// - Parameter label: Optional label used when serialising calls to the embedder.
-    public init(embedder: TextEmbedder, label: String = "Folio.MediaPipeTextEmbedderAdapter") {
+    /// - Parameters:
+    ///   - embedder: The underlying MediaPipe text embedder to delegate to.
+    ///   - model: The model identity (id + dimension) this embedder produces vectors for.
+    ///   - label: Optional label used when serialising calls to the embedder.
+    public init(embedder: TextEmbedder, model: EmbeddingModelInfo, label: String = "Folio.MediaPipeTextEmbedderAdapter") {
         self.embedder = embedder
+        self.model = model
         self.queue = DispatchQueue(label: label)
     }
 
-    public func embed(_ text: String) throws -> [Float] {
-        try queue.sync {
-            let result = try embedder.embed(text: text)
-            return try Self.vector(from: result)
+    public func embed(_ text: String) async throws -> [Float] {
+        try await withCheckedThrowingContinuation { cont in
+            queue.async {
+                do {
+                    let result = try self.embedder.embed(text: text)
+                    cont.resume(returning: try Self.vector(from: result))
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
         }
     }
 
-    public func embedBatch(_ texts: [String]) throws -> [[Float]] {
-        try queue.sync {
-            try texts.map { text in
-                let result = try embedder.embed(text: text)
-                return try Self.vector(from: result)
+    public func embedBatch(_ texts: [String]) async throws -> [[Float]] {
+        try await withCheckedThrowingContinuation { cont in
+            queue.async {
+                do {
+                    let vectors = try texts.map { text -> [Float] in
+                        let result = try self.embedder.embed(text: text)
+                        return try Self.vector(from: result)
+                    }
+                    cont.resume(returning: vectors)
+                } catch {
+                    cont.resume(throwing: error)
+                }
             }
         }
     }

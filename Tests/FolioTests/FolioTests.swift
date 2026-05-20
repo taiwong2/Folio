@@ -2,6 +2,19 @@
 import XCTest
 @testable import Folio
 
+struct FakeEmbeddingProvider: EmbeddingProvider {
+    let model: EmbeddingModelInfo
+
+    init(id: String = "fake-v1", dimension: Int = 3) {
+        self.model = EmbeddingModelInfo(id: id, dimension: dimension)
+    }
+
+    func embed(_ text: String) async throws -> [Float] {
+        let seed = Float((text.hashValue & 0xff) + 1)
+        return (0..<model.dimension).map { Float($0) * 0.01 + seed }
+    }
+}
+
 final class FolioSmokeTests: XCTestCase {
     func testTextIngestAndSearch() throws {
         let folio = try FolioEngine.inMemory()
@@ -102,5 +115,54 @@ final class FolioSmokeTests: XCTestCase {
 
         XCTAssertEqual(Set(markdownOnly.map(\.sourceId)), ["markdown"])
         XCTAssertEqual(markdownOnly.first?.citations.first?.fileType, "markdown")
+    }
+
+    func testIngestAsyncWithProviderRegistersIndex() async throws {
+        let provider = FakeEmbeddingProvider(id: "fake-v1", dimension: 3)
+        let folio = try FolioEngine.inMemory(embeddingProvider: provider)
+        _ = try await folio.ingestAsync(.text("hello vector world", name: "note.txt"), sourceId: "vec")
+
+        let info = try XCTUnwrap(folio.embeddingIndexInfo())
+        XCTAssertEqual(info.id, "fake-v1")
+        XCTAssertEqual(info.dimension, 3)
+    }
+
+    func testDimensionMismatchThrows() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("folio-mismatch-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let providerA = FakeEmbeddingProvider(id: "fake-v1", dimension: 3)
+        let providerB = FakeEmbeddingProvider(id: "fake-v2", dimension: 4)
+
+        let loaders: [DocumentLoader] = [TextDocumentLoader()]
+
+        do {
+            let folioA = try FolioEngine(databaseURL: url, loaders: loaders, chunker: UniversalChunker(), embeddingProvider: providerA)
+            _ = try await folioA.ingestAsync(.text("first source content", name: "a.txt"), sourceId: "A")
+            let info = try XCTUnwrap(folioA.embeddingIndexInfo())
+            XCTAssertEqual(info.id, "fake-v1")
+        }
+
+        let folioB = try FolioEngine(databaseURL: url, loaders: loaders, chunker: UniversalChunker(), embeddingProvider: providerB)
+        // sync ingest doesn't embed, so chunk needs backfilling — and provider B's model conflicts with the registered index.
+        _ = try folioB.ingest(.text("second source content", name: "b.txt"), sourceId: "B")
+
+        do {
+            try await folioB.backfillEmbeddings(for: "B")
+            XCTFail("Expected dimension mismatch to throw")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, "Folio")
+            XCTAssertEqual(error.code, 530)
+        }
+    }
+
+    func testSearchHybridReturnsCosineScoredResults() async throws {
+        let provider = FakeEmbeddingProvider(dimension: 4)
+        let folio = try FolioEngine.inMemory(embeddingProvider: provider)
+        _ = try await folio.ingestAsync(.text("retrieval keeps results grounded in source text", name: "rag.txt"), sourceId: "rag")
+
+        let results = try await folio.searchHybrid("retrieval", in: "rag", limit: 1)
+        let hit = try XCTUnwrap(results.first)
+        XCTAssertNotNil(hit.cosine)
     }
 }

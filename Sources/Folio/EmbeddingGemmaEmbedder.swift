@@ -2,7 +2,6 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Dispatch
 
 /// On-device adapter that talks to a local EmbeddingGemma runtime.
 ///
@@ -11,47 +10,56 @@ import Dispatch
 /// embeddings through a lightweight HTTP server on `localhost`. This adapter keeps the
 /// networking surface area small and performs one request per chunk, which matches
 /// the streaming nature of many on-device runtimes.
-public struct EmbeddingGemmaEmbedder: Embedder {
+public struct EmbeddingGemmaEmbedder: EmbeddingProvider {
     public struct Configuration: Sendable {
         /// Base URL of the local embedding server. Defaults to Ollama's standard port.
         public var baseURL: URL
         /// Model identifier understood by the runtime (e.g. "gemma:2b" or "gemma:7b" with an embedding template).
         public var model: String
+        /// Output vector dimension produced by `model`. Must be declared up front so Folio can
+        /// validate every persisted vector against the registered index.
+        public var dimension: Int
         /// Optional timeout applied to each request.
         public var timeout: TimeInterval
 
         public init(
             baseURL: URL = URL(string: "http://127.0.0.1:11434")!,
             model: String = "gemma:2b",
+            dimension: Int,
             timeout: TimeInterval = 60
         ) {
             self.baseURL = baseURL
             self.model = model
+            self.dimension = dimension
             self.timeout = timeout
         }
     }
 
+    public let model: EmbeddingModelInfo
     private let config: Configuration
     private let session: URLSession
 
-    public init(configuration: Configuration = .init(), session: URLSession = .shared) {
+    public init(configuration: Configuration, session: URLSession = .shared) {
         self.config = configuration
         self.session = session
+        self.model = EmbeddingModelInfo(id: configuration.model, dimension: configuration.dimension)
     }
 
-    public func embed(_ text: String) throws -> [Float] {
-        try embedBatch([text]).first ?? []
+    public func embed(_ text: String) async throws -> [Float] {
+        try await embedSingle(text: text)
     }
 
-    public func embedBatch(_ texts: [String]) throws -> [[Float]] {
+    public func embedBatch(_ texts: [String]) async throws -> [[Float]] {
         guard !texts.isEmpty else { return [] }
-
-        return try texts.map { text in
-            try embedSingle(text: text)
+        var out: [[Float]] = []
+        out.reserveCapacity(texts.count)
+        for text in texts {
+            out.append(try await embedSingle(text: text))
         }
+        return out
     }
 
-    private func embedSingle(text: String) throws -> [Float] {
+    private func embedSingle(text: String) async throws -> [Float] {
         let endpoint = config.baseURL.appendingPathComponent("api/embeddings")
 
         var request = URLRequest(url: endpoint)
@@ -60,32 +68,8 @@ public struct EmbeddingGemmaEmbedder: Embedder {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(EmbeddingRequest(model: config.model, input: text))
 
-        let semaphore = DispatchSemaphore(value: 0)
-        let result = LockedResult<Result<(Data, URLResponse), Error>>()
+        let (data, response) = try await session.data(for: request)
 
-        let task = session.dataTask(with: request) { data, response, error in
-            if let error {
-                result.set(.failure(error))
-            } else if let data, let response {
-                result.set(.success((data, response)))
-            } else {
-                result.set(.failure(NSError(domain: "Folio", code: 520, userInfo: [NSLocalizedDescriptionKey: "Empty embedding response"])))
-            }
-            semaphore.signal()
-        }
-        task.resume()
-
-        let waitResult = semaphore.wait(timeout: .now() + config.timeout)
-        if waitResult == .timedOut {
-            task.cancel()
-            throw NSError(domain: "Folio", code: 521, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request timed out"])
-        }
-
-        guard let outcome = result.get() else {
-            throw NSError(domain: "Folio", code: 522, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request missing result"])
-        }
-
-        let (data, response) = try outcome.get()
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "Folio", code: 523, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma invalid response"])
         }
@@ -107,21 +91,4 @@ private struct EmbeddingRequest: Encodable {
 
 private struct EmbeddingResponse: Decodable {
     let embedding: [Double]
-}
-
-private final class LockedResult<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value?
-
-    func set(_ value: Value) {
-        lock.lock()
-        self.value = value
-        lock.unlock()
-    }
-
-    func get() -> Value? {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
 }
