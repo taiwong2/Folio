@@ -156,6 +156,12 @@ final class FolioSmokeTests: XCTestCase {
         }
     }
 
+    func testEmbeddingGemma300mModelInfoIsPinned() {
+        let info = EmbeddingModelInfo.embeddingGemma300m
+        XCTAssertEqual(info.id, "embedding-gemma-300m")
+        XCTAssertEqual(info.dimension, 768)
+    }
+
     func testSearchHybridReturnsCosineScoredResults() async throws {
         let provider = FakeEmbeddingProvider(dimension: 4)
         let folio = try FolioEngine.inMemory(embeddingProvider: provider)

@@ -17,6 +17,17 @@ public struct EmbeddingModelInfo: Sendable, Hashable, Codable {
     }
 }
 
+public extension EmbeddingModelInfo {
+    /// Google EmbeddingGemma 300M — purpose-built on-device text embedding model
+    /// derived from Gemma 3. Native 768-dim output (MRL-truncatable to 512/256/128).
+    /// Top open model under 500M params on MTEB; distributed in LiteRT/MediaPipe form
+    /// (see `litert-community/embeddinggemma-300m` on Hugging Face).
+    static let embeddingGemma300m = EmbeddingModelInfo(
+        id: "embedding-gemma-300m",
+        dimension: 768
+    )
+}
+
 public protocol EmbeddingProvider: Sendable {
     var model: EmbeddingModelInfo { get }
     func embed(_ text: String) async throws -> [Float]

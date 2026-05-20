@@ -104,4 +104,20 @@ public final class MediaPipeTextEmbedderAdapter: EmbeddingProvider {
 }
 
 extension MediaPipeTextEmbedderAdapter: @unchecked Sendable {}
+
+public extension MediaPipeTextEmbedderAdapter {
+    /// Loads Google's EmbeddingGemma 300M MediaPipe model from the given path
+    /// and returns an adapter pinned to `EmbeddingModelInfo.embeddingGemma300m`
+    /// so persisted vectors are validated against the 768-dim contract.
+    ///
+    /// Obtain a compatible `.task` / `.tflite` file from the
+    /// [litert-community/embeddinggemma-300m](https://huggingface.co/litert-community/embeddinggemma-300m)
+    /// Hugging Face repo and bundle it with your app.
+    static func embeddingGemma300m(modelPath: URL) throws -> MediaPipeTextEmbedderAdapter {
+        let options = TextEmbedderOptions()
+        options.baseOptions.modelAssetPath = modelPath.path
+        let embedder = try TextEmbedder(options: options)
+        return MediaPipeTextEmbedderAdapter(embedder: embedder, model: .embeddingGemma300m)
+    }
+}
 #endif

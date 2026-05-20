@@ -13,7 +13,8 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - SQLite storage with FTS5 BM25 search
 - Contextual prefix hooks and prefix cache
 - Apple Foundation Models prefix helper when `FoundationModels` is available on iOS 26+ or macOS 26+
-- Vector storage for embedded chunks
+- Vector storage for embedded chunks with model-id + dimension validation
+- On-device EmbeddingGemma via MediaPipe (`MediaPipeTextEmbedderAdapter.embeddingGemma300m`)
 - Hybrid retrieval prototype using BM25 candidates, cosine scoring, rank fusion, and neighbor expansion
 - OpenAI-compatible chat completions client for local runtimes or hosted providers
 
@@ -22,7 +23,6 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - DOCX ingestion
 - Image indexing beyond PDF OCR fallback
 - LiteRT-LM Gemma generation integration
-- True on-device EmbeddingGemma support
 - High-level `answer()` orchestration
 - Full vector candidate search instead of BM25-first hybrid retrieval
 - Citation generation and source attribution helpers
@@ -142,21 +142,21 @@ if #available(iOS 26.0, macOS 26.0, *) {
 
 ## Hybrid Retrieval
 
-Pass an `Embedder` implementation to `FolioEngine`, ingest with `ingestAsync`, and backfill missing vectors when needed:
+Pass an `EmbeddingProvider` to `FolioEngine`, ingest with `ingestAsync`, and backfill missing vectors when needed. Each provider declares its `EmbeddingModelInfo` (id + dimension) so Folio refuses to mix vectors from incompatible models in the same index.
+
+### On-device (MediaPipe + EmbeddingGemma)
+
+Bundle the EmbeddingGemma 300M model file (`.task`/`.tflite` from [litert-community/embeddinggemma-300m](https://huggingface.co/litert-community/embeddinggemma-300m)) with your app, then:
 
 ```swift
-let embedder = EmbeddingGemmaEmbedder(
-    configuration: .init(
-        baseURL: URL(string: "http://127.0.0.1:11434")!,
-        model: "gemma:2b"
-    )
-)
+let modelURL = Bundle.main.url(forResource: "embeddinggemma-300m", withExtension: "task")!
+let provider = try MediaPipeTextEmbedderAdapter.embeddingGemma300m(modelPath: modelURL)
 
-let engine = try FolioEngine.inMemory(embedder: embedder)
+let engine = try FolioEngine.inMemory(embeddingProvider: provider)
 _ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note")
-try engine.backfillEmbeddings()
+try await engine.backfillEmbeddings()
 
-let results = try engine.searchHybrid(
+let results = try await engine.searchHybrid(
     "streaming mode",
     in: "note",
     limit: 5,
@@ -164,7 +164,25 @@ let results = try engine.searchHybrid(
 )
 ```
 
-`EmbeddingGemmaEmbedder` is currently an HTTP adapter for a local embedding runtime. Native on-device EmbeddingGemma integration is planned.
+### Local HTTP (Ollama)
+
+For workflows that already run an embedding server on `localhost`:
+
+```swift
+let provider = EmbeddingGemmaEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "http://127.0.0.1:11434")!,
+        model: "embeddinggemma",
+        dimension: 768
+    )
+)
+
+let engine = try FolioEngine.inMemory(embeddingProvider: provider)
+_ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note")
+try await engine.backfillEmbeddings()
+```
+
+`Configuration.dimension` is required and must match the model's output size; it gets persisted to the `embedding_indexes` table and validated on every write.
 
 ## OpenAI-Compatible Chat
 
