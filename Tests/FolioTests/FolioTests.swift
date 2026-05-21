@@ -2,19 +2,6 @@
 import XCTest
 @testable import Folio
 
-struct FakeEmbeddingProvider: EmbeddingProvider {
-    let model: EmbeddingModelInfo
-
-    init(id: String = "fake-v1", dimension: Int = 3) {
-        self.model = EmbeddingModelInfo(id: id, dimension: dimension)
-    }
-
-    func embed(_ text: String) async throws -> [Float] {
-        let seed = Float((text.hashValue & 0xff) + 1)
-        return (0..<model.dimension).map { Float($0) * 0.01 + seed }
-    }
-}
-
 final class FolioSmokeTests: XCTestCase {
     func testTextIngestAndSearch() throws {
         let folio = try FolioEngine.inMemory()
@@ -38,6 +25,13 @@ final class FolioSmokeTests: XCTestCase {
     func testOpenAIStyleClientDefaultURLDoesNotDuplicateV1() {
         let client = OpenAIStyleClient()
         XCTAssertEqual(client.chatCompletionsURL.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
+    }
+
+    func testOpenAIStyleEmbedderDefaultURLDoesNotDuplicateV1() {
+        let embedder = OpenAIStyleEmbedder(configuration: .init(model: "text-embedding-3-small", dimension: 1536))
+        XCTAssertEqual(embedder.embeddingsURL.absoluteString, "http://127.0.0.1:11434/v1/embeddings")
+        XCTAssertEqual(embedder.model.id, "text-embedding-3-small")
+        XCTAssertEqual(embedder.model.dimension, 1536)
     }
 
     func testReingestingSameSourceKeepsStableChunkIds() throws {

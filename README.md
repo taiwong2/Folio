@@ -15,6 +15,8 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - Apple Foundation Models prefix helper when `FoundationModels` is available on iOS 26+ or macOS 26+
 - Vector storage for embedded chunks with model-id + dimension validation
 - On-device EmbeddingGemma via MediaPipe (`MediaPipeTextEmbedderAdapter.embeddingGemma300m`)
+- OpenAI-compatible embedding adapter (`OpenAIStyleEmbedder`) for hosted providers or local servers
+- Public `FakeEmbeddingProvider` for consumer-side tests
 - Hybrid retrieval prototype using BM25 candidates, cosine scoring, rank fusion, and neighbor expansion
 - OpenAI-compatible chat completions client for local runtimes or hosted providers
 
@@ -166,7 +168,7 @@ let results = try await engine.searchHybrid(
 
 > **Note:** MediaPipe Tasks for iOS only ships via CocoaPods, which cannot be added to a pure SPM `Package.swift`. The factory above is therefore only compiled inside `#if canImport(MediaPipeTasksText)` and is not exercised by Folio's own test suite — it will only type-check inside a host app that installs the `MediaPipeTasksText` pod alongside Folio. End-to-end verification will land via a demo app.
 
-### Local HTTP (Ollama)
+### Local HTTP (Ollama, native API)
 
 For workflows that already run an embedding server on `localhost`:
 
@@ -184,7 +186,35 @@ _ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note"
 try await engine.backfillEmbeddings()
 ```
 
+### OpenAI-compatible HTTP
+
+For OpenAI itself or any provider mirroring the `/v1/embeddings` shape (including Ollama's OpenAI-compat mode):
+
+```swift
+let provider = OpenAIStyleEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "https://api.openai.com")!,
+        model: "text-embedding-3-small",
+        dimension: 1536,
+        apiKey: apiKey
+    )
+)
+
+let engine = try FolioEngine.inMemory(embeddingProvider: provider)
+_ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note")
+try await engine.backfillEmbeddings()
+```
+
 `Configuration.dimension` is required and must match the model's output size; it gets persisted to the `embedding_indexes` table and validated on every write.
+
+### Tests without a real embedder
+
+`FakeEmbeddingProvider` produces deterministic vectors from a hash of the input. Use it in your own tests so retrieval paths can run without standing up a model:
+
+```swift
+let provider = FakeEmbeddingProvider(dimension: 8)
+let engine = try FolioEngine.inMemory(embeddingProvider: provider)
+```
 
 ## OpenAI-Compatible Chat
 
