@@ -164,6 +164,8 @@ let results = try await engine.searchHybrid(
 )
 ```
 
+> **Note:** MediaPipe Tasks for iOS only ships via CocoaPods, which cannot be added to a pure SPM `Package.swift`. The factory above is therefore only compiled inside `#if canImport(MediaPipeTasksText)` and is not exercised by Folio's own test suite — it will only type-check inside a host app that installs the `MediaPipeTasksText` pod alongside Folio. End-to-end verification will land via a demo app.
+
 ### Local HTTP (Ollama)
 
 For workflows that already run an embedding server on `localhost`:
