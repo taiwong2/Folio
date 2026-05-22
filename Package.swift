@@ -23,6 +23,15 @@ let package = Package(
             dependencies: [.product(name: "GRDB", package: "GRDB.swift")],
             resources: [.process("Resources")]
         ),
+        // Demo app. Not listed in `products` so library consumers don't pull
+        // the SwiftUI sources into their build. Runnable from the package root
+        // with `swift run FolioDemo`, and shows up as a scheme automatically
+        // when this Package.swift is opened in Xcode.
+        .executableTarget(
+            name: "FolioDemo",
+            dependencies: ["Folio"],
+            path: "Example/Sources/FolioDemo"
+        ),
         .testTarget(name: "FolioTests", dependencies: ["Folio"], resources: [.process("Fixtures")])
     ]
 )
