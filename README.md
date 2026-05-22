@@ -18,16 +18,18 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - OpenAI-compatible embedding adapter (`OpenAIStyleEmbedder`) for hosted providers or local servers
 - Public `FakeEmbeddingProvider` for consumer-side tests
 - Hybrid retrieval prototype using BM25 candidates, cosine scoring, rank fusion, and neighbor expansion
-- OpenAI-compatible chat completions client for local runtimes or hosted providers
+- OpenAI-compatible chat completions client (with SSE streaming) for local runtimes or hosted providers
+- Pluggable `TextGenerator` protocol with backends for OpenAI-compatible cloud (`OpenAIStyleGenerator.cloud(...)`), Apple Foundation Models (`FoundationTextGenerator`), and a `FakeTextGenerator` for tests
+- High-level `engine.answer(_:)` / `engine.answerStream(_:)` that retrieve, prompt, generate, and resolve inline citation markers in one call
 
 ## Planned Features
 
 - DOCX ingestion
 - Image indexing beyond PDF OCR fallback
-- LiteRT-LM Gemma generation integration
-- High-level `answer()` orchestration
+- LiteRT-LM Gemma on-device generation (parked behind the same SPM/CocoaPods blocker as MediaPipe; demo app gates it)
 - Full vector candidate search instead of BM25-first hybrid retrieval
-- Citation generation and source attribution helpers
+- Native (non-OpenAI-compat) Anthropic and Gemini generators for provider-specific features
+- MMR diversification, reranking, and confidence-policy helpers
 
 ## Installation
 
@@ -214,6 +216,77 @@ try await engine.backfillEmbeddings()
 ```swift
 let provider = FakeEmbeddingProvider(dimension: 8)
 let engine = try FolioEngine.inMemory(embeddingProvider: provider)
+```
+
+## Generation: `answer()`
+
+Once a `FolioEngine` is wired with both an `EmbeddingProvider` and a `TextGenerator`, the engine can run the full retrieval → prompt → generate → cite loop:
+
+```swift
+let engine = try FolioEngine.inMemory(
+    embeddingProvider: provider,
+    textGenerator: OpenAIStyleGenerator.cloud(.openAI(model: "gpt-4o-mini", apiKey: openAIKey))
+)
+_ = try await engine.ingestAsync(.pdf(pdfURL), sourceId: "manual")
+
+let result = try await engine.answer("how do I configure retries?", in: "manual")
+print(result.text)             // model's answer, with [1], [2], … markers preserved
+print(result.citations)        // resolved Citation list in the order the markers appear
+print(result.usedPassages)     // RetrievedResult list with BM25 + cosine + fused scores
+```
+
+Streaming uses the same shape but yields an `AnswerStreamEvent` stream — `.passages(...)` first, then `.text(delta)` fragments, then `.done(Answer)`:
+
+```swift
+let stream = try await engine.answerStream("how do I configure retries?", in: "manual")
+for try await event in stream {
+    switch event {
+    case .passages(let passages):
+        print("retrieved \(passages.count) candidates")
+    case .text(let delta):
+        print(delta, terminator: "")
+    case .done(let answer):
+        print("\n[citations: \(answer.citations.count)]")
+    }
+}
+```
+
+### Cloud generators (one-line setup)
+
+`OpenAIStyleGenerator.cloud(...)` accepts a `CloudProvider` enum that pre-configures each provider's OpenAI-compatible endpoint and authentication:
+
+```swift
+.openAI(model: "gpt-4o-mini", apiKey: openAIKey)
+.anthropic(model: "claude-sonnet-4-6", apiKey: anthropicKey)
+.gemini(model: "gemini-2.0-flash", apiKey: googleKey)
+.ollama(model: "llama3")                                  // localhost, no key
+.custom(model: "router-1", baseURL: routerURL, apiKey: routerKey)
+```
+
+> Anthropic and Gemini are reached via each provider's OpenAI-compatible layer, which covers chat completion well. Provider-native features (Claude prompt caching, Gemini multimodal, etc.) require a dedicated `TextGenerator` conformance — not built in yet.
+
+### On-device generation (Apple Foundation Models)
+
+When the `FoundationModels` framework is available (iOS 26+/macOS 26+), `FoundationTextGenerator` runs answers entirely on-device with no network:
+
+```swift
+if #available(iOS 26, macOS 26, *) {
+    let engine = try FolioEngine.inMemory(
+        embeddingProvider: provider,
+        textGenerator: FoundationTextGenerator()
+    )
+}
+```
+
+### Tests without a real model
+
+`FakeTextGenerator` returns deterministic responses and emits a `[1]` citation marker when at least one passage is present, so end-to-end retrieval/citation tests can run without standing up a model:
+
+```swift
+let engine = try FolioEngine.inMemory(
+    embeddingProvider: FakeEmbeddingProvider(dimension: 8),
+    textGenerator: FakeTextGenerator()
+)
 ```
 
 ## OpenAI-Compatible Chat

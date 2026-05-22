@@ -95,32 +95,33 @@ public final class FolioEngine {
     private let loaders: [DocumentLoader]
     private let chunker: Chunker
     private let embeddingProvider: EmbeddingProvider?
+    private let textGenerator: TextGenerator?
 
-    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil) throws {
+    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider)
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
     }
 
 
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil) throws {
+    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider)
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
     }
 
-    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil) throws -> FolioEngine {
+    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws -> FolioEngine {
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
-        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider)
+        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
     }
 
-    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embeddingProvider: EmbeddingProvider?) throws {
+    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embeddingProvider: EmbeddingProvider?, textGenerator: TextGenerator? = nil) throws {
         try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         self.db = try AppDatabase(path: databaseURL.path)
@@ -128,6 +129,7 @@ public final class FolioEngine {
         self.loaders = loaders
         self.chunker = chunker
         self.embeddingProvider = embeddingProvider
+        self.textGenerator = textGenerator
     }
     
     //Ingest any supported input with caller chosen sourceID
@@ -507,6 +509,126 @@ public final class FolioEngine {
         try store.listSources()
     }
     
+    /// Retrieves relevant passages for `question`, builds a prompt with the configured
+    /// `AnswerTemplate`, asks the configured `TextGenerator` to synthesise an answer,
+    /// and returns the text along with citations resolved from any `[N]` markers the
+    /// model emitted.
+    ///
+    /// Throws `Folio` error code 600 if no `TextGenerator` was supplied at engine
+    /// construction.
+    public func answer(
+        _ question: String,
+        in sourceId: String? = nil,
+        filter: RetrievalFilter = .init(),
+        limit: Int = 5,
+        template: AnswerTemplate = .default,
+        temperature: Double? = 0.2,
+        maxTokens: Int? = 1024
+    ) async throws -> Answer {
+        guard let generator = textGenerator else {
+            throw NSError(
+                domain: "Folio",
+                code: 600,
+                userInfo: [NSLocalizedDescriptionKey: "answer() requires a TextGenerator on the FolioEngine"]
+            )
+        }
+
+        let searchQuery = FolioEngine.sanitizeForFTS(question)
+        let passages = try await searchHybrid(searchQuery, in: sourceId, filter: filter, limit: limit)
+        let messages = template.build(question, passages)
+        let request = GenerationRequest(messages: messages, temperature: temperature, maxTokens: maxTokens)
+        let text = try await generator.generate(request)
+        let citations = resolveCitationMarkers(in: text, passages: passages)
+
+        return Answer(text: text, citations: citations, usedPassages: passages)
+    }
+
+    /// Streaming variant of `answer`. Emits the retrieved passages up front, then
+    /// streams text fragments from the generator, then a final consolidated `Answer`.
+    ///
+    /// The function is `async throws` because retrieval is awaited before the stream
+    /// is constructed; the returned stream only captures `Sendable` values.
+    public func answerStream(
+        _ question: String,
+        in sourceId: String? = nil,
+        filter: RetrievalFilter = .init(),
+        limit: Int = 5,
+        template: AnswerTemplate = .default,
+        temperature: Double? = 0.2,
+        maxTokens: Int? = 1024
+    ) async throws -> AsyncThrowingStream<AnswerStreamEvent, Error> {
+        guard let generator = textGenerator else {
+            throw NSError(
+                domain: "Folio",
+                code: 600,
+                userInfo: [NSLocalizedDescriptionKey: "answerStream() requires a TextGenerator on the FolioEngine"]
+            )
+        }
+
+        let searchQuery = FolioEngine.sanitizeForFTS(question)
+        let passages = try await searchHybrid(searchQuery, in: sourceId, filter: filter, limit: limit)
+        let messages = template.build(question, passages)
+        let request = GenerationRequest(messages: messages, temperature: temperature, maxTokens: maxTokens)
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                continuation.yield(.passages(passages))
+
+                var accumulated = ""
+                do {
+                    for try await delta in generator.stream(request) {
+                        if Task.isCancelled { break }
+                        accumulated += delta
+                        continuation.yield(.text(delta))
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                    return
+                }
+
+                let citations = resolveCitationMarkers(in: accumulated, passages: passages)
+                continuation.yield(.done(Answer(text: accumulated, citations: citations, usedPassages: passages)))
+                continuation.finish()
+            }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
+    /// Converts a natural-language question into an FTS5 `MATCH` expression that
+    /// behaves usefully for question-answering.
+    ///
+    /// Two problems are addressed here:
+    /// 1. FTS5's query parser rejects bare punctuation like `?` and `!`, so a
+    ///    natural question like "what jumps over the dog?" otherwise crashes
+    ///    retrieval. Non-alphanumerics are squashed to spaces.
+    /// 2. FTS5's default operator is implicit AND, which is hostile to natural
+    ///    questions — "what jumps over the dog" requires every word to appear,
+    ///    and stop-words like "what" usually won't. Tokens are quoted and joined
+    ///    with `OR` so partial overlap surfaces candidate chunks, leaving final
+    ///    ranking to BM25 + vector fusion.
+    ///
+    /// Direct callers of `searchHybrid` / `search` still pass through FTS5
+    /// unmodified, so power users keeping their own query DSL aren't affected.
+    internal static func sanitizeForFTS(_ query: String) -> String {
+        var cleaned = ""
+        cleaned.reserveCapacity(query.count)
+        for scalar in query.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                cleaned.unicodeScalars.append(scalar)
+            } else {
+                cleaned.unicodeScalars.append(" ")
+            }
+        }
+        let tokens = cleaned
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !tokens.isEmpty else { return "" }
+        return tokens.map { "\"\($0)\"" }.joined(separator: " OR ")
+    }
+
     internal static func defaultDatabaseURL() throws -> URL {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
