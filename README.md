@@ -14,7 +14,8 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - Contextual prefix hooks and prefix cache
 - Apple Foundation Models prefix helper when `FoundationModels` is available on iOS 26+ or macOS 26+
 - Vector storage for embedded chunks with model-id + dimension validation
-- On-device EmbeddingGemma via MediaPipe (`MediaPipeTextEmbedderAdapter.embeddingGemma300m`)
+- **All-in-one on-device EmbeddingGemma 300M (`EmbeddingGemmaProvider`)** — in-process Core ML inference on the Apple Neural Engine, auto-downloads + caches the model on first use, zero CocoaPods
+- Local-server EmbeddingGemma via Ollama (`EmbeddingGemmaEmbedder`)
 - OpenAI-compatible embedding adapter (`OpenAIStyleEmbedder`) for hosted providers or local servers
 - Public `FakeEmbeddingProvider` for consumer-side tests
 - Hybrid retrieval prototype using BM25 candidates, cosine scoring, rank fusion, and neighbor expansion
@@ -26,7 +27,7 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 
 - DOCX ingestion
 - Image indexing beyond PDF OCR fallback
-- LiteRT-LM Gemma on-device generation (parked behind the same SPM/CocoaPods blocker as MediaPipe; demo app gates it)
+- On-device LLM generation (Gemma / Qwen / etc.) — currently best served through `OpenAIStyleGenerator.cloud(.ollama(...))` against a local Ollama; an in-process Core ML generator is potential future work
 - Full vector candidate search instead of BM25-first hybrid retrieval
 - Native (non-OpenAI-compat) Anthropic and Gemini generators for provider-specific features
 - MMR diversification, reranking, and confidence-policy helpers
@@ -148,27 +149,22 @@ if #available(iOS 26.0, macOS 26.0, *) {
 
 Pass an `EmbeddingProvider` to `FolioEngine`, ingest with `ingestAsync`, and backfill missing vectors when needed. Each provider declares its `EmbeddingModelInfo` (id + dimension) so Folio refuses to mix vectors from incompatible models in the same index.
 
-### On-device (MediaPipe + EmbeddingGemma)
+### On-device (EmbeddingGemma 300M, Core ML, Apple Neural Engine)
 
-Bundle the EmbeddingGemma 300M model file (`.task`/`.tflite` from [litert-community/embeddinggemma-300m](https://huggingface.co/litert-community/embeddinggemma-300m)) with your app, then:
+The recommended path. Zero CocoaPods, zero manual model download — `EmbeddingGemmaProvider()` is one line, and on first `embed()` it auto-fetches the Core ML bundle (~300 MB) to `~/Library/Application Support/Folio/models/` and runs every subsequent call on the Apple Neural Engine.
 
 ```swift
-let modelURL = Bundle.main.url(forResource: "embeddinggemma-300m", withExtension: "task")!
-let provider = try MediaPipeTextEmbedderAdapter.embeddingGemma300m(modelPath: modelURL)
+if #available(iOS 18, macOS 15, *) {
+    let provider = EmbeddingGemmaProvider()
+    let engine = try FolioEngine.inMemory(embeddingProvider: provider)
 
-let engine = try FolioEngine.inMemory(embeddingProvider: provider)
-_ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note")
-try await engine.backfillEmbeddings()
+    _ = try await engine.ingestAsync(.text(body, name: "note.txt"), sourceId: "note")
 
-let results = try await engine.searchHybrid(
-    "streaming mode",
-    in: "note",
-    limit: 5,
-    expand: 1
-)
+    let results = try await engine.searchHybrid("streaming mode", in: "note", limit: 5, expand: 1)
+}
 ```
 
-> **Note:** MediaPipe Tasks for iOS only ships via CocoaPods, which cannot be added to a pure SPM `Package.swift`. The factory above is therefore only compiled inside `#if canImport(MediaPipeTasksText)` and is not exercised by Folio's own test suite — it will only type-check inside a host app that installs the `MediaPipeTasksText` pod alongside Folio. End-to-end verification will land via a demo app.
+Backed by [`john-rocky/CoreML-LLM`](https://github.com/john-rocky/CoreML-LLM) (MIT). The first `embed()` typically takes 30–60 s wall-clock (download + compile + ANE warm-up); subsequent calls are millisecond-scale. Output is 768-dim L2-normalised vectors; the underlying model supports Matryoshka truncation to 512/256/128 if you need smaller storage.
 
 ### Local HTTP (Ollama, native API)
 

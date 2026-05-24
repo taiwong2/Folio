@@ -51,9 +51,7 @@ End-to-end paths that the package's own tests can only mock:
 
 ## What this *doesn't* verify
 
-- The MediaPipe on-device embedding path (`MediaPipeTextEmbedderAdapter.embeddingGemma300m`).
-  MediaPipe is CocoaPods-only, so wiring it into this SPM-based demo would require
-  adding a Podfile + Workspace, plus downloading the ~300 MB EmbeddingGemma `.task`
-  file. Punted to a future demo iteration.
-- The OpenAI-compatible embedding adapter (`OpenAIStyleEmbedder`). The demo runs
-  retrieval BM25-only for simplicity; no separate embedding API call is required.
+- A real document corpus larger than the bundled sample (the inspector view lets you
+  pick any PDF / text / markdown via the iOS Files picker once running).
+- Stress testing under heavy concurrent load — the demo serialises one ask at a time
+  by design so the UI stays predictable.

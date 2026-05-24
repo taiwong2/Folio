@@ -13,14 +13,22 @@ let package = Package(
             targets: ["Folio"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.26.0")
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.26.0"),
+        // CoreML-LLM ships a Core ML-converted EmbeddingGemma 300M plus its own
+        // tokenizer, exposed via `EmbeddingGemma.downloadAndLoad`/`encode`. MIT
+        // licensed, SPM-distributable — this is what lets Folio deliver true
+        // in-process on-device EmbeddingGemma without CocoaPods.
+        .package(url: "https://github.com/john-rocky/CoreML-LLM", from: "1.0.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "Folio",
-            dependencies: [.product(name: "GRDB", package: "GRDB.swift")],
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "CoreMLLLM", package: "CoreML-LLM")
+            ],
             resources: [.process("Resources")]
         ),
         // Demo app. Not listed in `products` so library consumers don't pull
