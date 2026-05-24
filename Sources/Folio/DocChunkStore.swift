@@ -50,6 +50,25 @@ extension DocChunkStore {
         public let page: Int?
         public let sectionTitle: String?
         public let parentId: String?
+        public let contextPrefix: String
+
+        public init(
+            rowid: Int64,
+            chunkId: String,
+            text: String,
+            page: Int?,
+            sectionTitle: String?,
+            parentId: String?,
+            contextPrefix: String = ""
+        ) {
+            self.rowid = rowid
+            self.chunkId = chunkId
+            self.text = text
+            self.page = page
+            self.sectionTitle = sectionTitle
+            self.parentId = parentId
+            self.contextPrefix = contextPrefix
+        }
     }
 
     public struct VectorRow: Sendable {
@@ -194,7 +213,8 @@ extension DocChunkStore {
     func fetchAllChunks(forSourceId sourceId: String) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let rows = try Row.fetchAll(db, sql: """
-                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id
+                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id,
+                       COALESCE(context_prefix, '') AS context_prefix
                 FROM doc_chunks
                 WHERE source_id = ?
                 ORDER BY rowid ASC
@@ -207,7 +227,8 @@ extension DocChunkStore {
                     text: row["content"],
                     page: row["page"],
                     sectionTitle: row["section_title"],
-                    parentId: row["parent_id"]
+                    parentId: row["parent_id"],
+                    contextPrefix: row["context_prefix"]
                 )
             }
         }

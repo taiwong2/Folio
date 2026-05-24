@@ -372,6 +372,23 @@ struct ChunkInspectorView: View {
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
             }
+            if !chunk.contextPrefix.isEmpty {
+                // Surface the contextual prefix as a distinct, labelled line so
+                // the user can see what the prefix generator produced vs. the
+                // raw chunk text Folio stored.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Prefix")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tint)
+                    Text(chunk.contextPrefix)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+            }
             Text(chunk.text)
                 .font(.system(.callout, design: .monospaced))
                 .textSelection(.enabled)
