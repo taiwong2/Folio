@@ -114,7 +114,12 @@ public struct AnswerTemplate: Sendable {
     public static let `default` = AnswerTemplate { question, passages in
         let system = """
         You are a careful assistant. Answer the user's question using ONLY the passages below.
-        Cite supporting passages inline with their numbered markers like [1] or [2].
+
+        Citation rules (these are required, not optional):
+        • Every factual claim must be followed by a numbered marker like [1] or [2] referring to the passage that supports it.
+        • If a single sentence draws on multiple passages, list each: "X did Y [1][3]."
+        • Answers with no citations will be rejected as ungrounded.
+
         If the passages do not contain enough information, say so plainly instead of guessing.
         """
 

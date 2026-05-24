@@ -267,7 +267,7 @@ struct ContentView: View {
             }
 
             if !state.citations.isEmpty {
-                Text("Citations").font(.subheadline.bold())
+                Text("Citations (\(state.citations.count))").font(.subheadline.bold())
                 ForEach(Array(state.citations.enumerated()), id: \.offset) { (index, citation) in
                     HStack(alignment: .top, spacing: 8) {
                         Text("[\(index + 1)]").font(.callout.monospaced()).foregroundStyle(.tint)
@@ -282,6 +282,20 @@ struct ContentView: View {
                         }
                     }
                 }
+            } else if !state.usedPassages.isEmpty && !state.streamedAnswer.isEmpty {
+                // The model returned an answer but didn't emit [N] markers. Don't
+                // hide the citations region silently — say what happened so the
+                // user knows the answer is still grounded in the retrieved
+                // passages above (just not pinpointed sentence-by-sentence).
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("No inline citations", systemImage: "questionmark.circle")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                    Text("The model answered without inline [N] markers — common with smaller on-device models. The answer is still grounded in the **Retrieved passages** above; the model just didn't pinpoint which one supports which claim. Cloud models (GPT-4, Claude) emit markers reliably.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(8)
+                .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
         }
     }

@@ -174,7 +174,11 @@ final class DemoState: @unchecked Sendable {
                     streamedAnswer += delta
                 case .done(let answer):
                     citations = answer.citations
-                    status = "Done. \(answer.citations.count) citation(s)."
+                    if answer.citations.isEmpty && !answer.usedPassages.isEmpty {
+                        status = "Done — \(answer.usedPassages.count) passage(s) retrieved, but the model didn't emit inline [N] markers (common with on-device models)."
+                    } else {
+                        status = "Done. \(answer.citations.count) citation(s) drawn from \(answer.usedPassages.count) retrieved passage(s)."
+                    }
                 }
             }
         } catch {
