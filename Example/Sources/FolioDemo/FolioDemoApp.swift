@@ -23,6 +23,13 @@ struct FolioDemoApp: App {
         WindowGroup("Folio Demo") {
             ContentView()
                 .environment(state)
+                .task {
+                    // Kick off the EmbeddingGemma cold-start in the background
+                    // as soon as the window appears. By the time the user picks
+                    // a document and asks a question, the model is already
+                    // downloaded, loaded, and the ANE is warmed up.
+                    state.warmUpEmbeddingGemmaIfNeeded()
+                }
         }
     }
 }

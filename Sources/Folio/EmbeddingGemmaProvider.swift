@@ -78,6 +78,24 @@ public actor EmbeddingGemmaProvider: EmbeddingProvider {
         return out
     }
 
+    /// Eagerly performs the cold-start work — download (first run only), Core ML
+    /// load, and one tiny dummy encode to compile ANE kernels for the model's
+    /// input shapes. Call once at app launch (e.g. inside a background `Task`)
+    /// so the first user-facing `embed(_:)` returns at warm-cache latency
+    /// (milliseconds) instead of paying the load + warmup cost (~4 seconds).
+    ///
+    /// Idempotent: if the model is already loaded, returns immediately.
+    public func prepare() async throws {
+        let model = try await ensureLoaded()
+        _ = try model.encode(text: " ", task: task)
+    }
+
+    /// `true` once the model has been loaded into memory; consumers can use this
+    /// to render a "ready" indicator after calling `prepare()`.
+    public var isReady: Bool {
+        loaded != nil
+    }
+
     private func ensureLoaded() async throws -> EmbeddingGemma {
         if let loaded { return loaded }
         let eg = try await EmbeddingGemma.downloadAndLoad(

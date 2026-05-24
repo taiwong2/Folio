@@ -40,6 +40,14 @@ final class DemoState: @unchecked Sendable {
     var ollamaEmbeddingModel: String = "embeddinggemma"
     var ollamaBaseURL: String = "http://127.0.0.1:11434"
     var openAIEmbeddingModel: String = "text-embedding-3-small"
+    /// When `true`, ingest runs each chunk through Apple Foundation Models
+    /// (`FoundationModelsPrefixGenerator`) to produce a short retrieval prefix,
+    /// then prepends it to the chunk text before embedding. Improves retrieval
+    /// recall — especially on short, similar chunks where raw embeddings struggle
+    /// to disambiguate — at the cost of one on-device LLM call per chunk during
+    /// ingest. Falls back to a rule-based heuristic if Foundation Models is
+    /// unavailable on the device.
+    var useContextualPrefixes: Bool = true
 
     // MARK: - Conversation
     var question: String = "What is an actor in Swift?"
@@ -69,6 +77,14 @@ final class DemoState: @unchecked Sendable {
 
     private var lastIngest: LastIngest?
     private var engine: FolioEngine?
+
+    /// Stable Core ML provider held across engine rebuilds so the loaded model
+    /// and warmed-up ANE kernels survive a re-ingest or backend switch. Lazily
+    /// constructed the first time `.embeddingGemmaCoreML` is selected.
+    private var cachedGemmaProvider: AnyObject?
+
+    /// User-visible "EmbeddingGemma: preparing… / ready" hint for the picker UI.
+    var embeddingGemmaReady: Bool = false
 
     // MARK: - Ingest entry points
 
@@ -202,6 +218,7 @@ final class DemoState: @unchecked Sendable {
         let generator = makeGeneratorIfPossible()
         let embedder = try makeEmbedderIfPossible()
         let fresh = try FolioEngine.inMemory(embeddingProvider: embedder, textGenerator: generator)
+        let config = makeFolioConfig()
 
         let result: (pages: Int, chunks: Int)
 
@@ -209,7 +226,8 @@ final class DemoState: @unchecked Sendable {
         case .sample:
             result = try await fresh.ingestAsync(
                 .text(SampleDocument.text, name: SampleDocument.name),
-                sourceId: SampleDocument.sourceId
+                sourceId: SampleDocument.sourceId,
+                config: config
             )
 
         case .file(let url):
@@ -225,19 +243,22 @@ final class DemoState: @unchecked Sendable {
             if contentType?.conforms(to: .pdf) == true {
                 result = try await fresh.ingestAsync(
                     .pdf(url),
-                    sourceId: url.lastPathComponent
+                    sourceId: url.lastPathComponent,
+                    config: config
                 )
             } else if isMarkdown {
                 let data = try Data(contentsOf: url)
                 result = try await fresh.ingestAsync(
                     .data(data, uti: "public.markdown", name: url.lastPathComponent),
-                    sourceId: url.lastPathComponent
+                    sourceId: url.lastPathComponent,
+                    config: config
                 )
             } else if contentType?.conforms(to: .text) == true {
                 let content = try String(contentsOf: url, encoding: .utf8)
                 result = try await fresh.ingestAsync(
                     .text(content, name: url.lastPathComponent),
-                    sourceId: url.lastPathComponent
+                    sourceId: url.lastPathComponent,
+                    config: config
                 )
             } else {
                 throw NSError(
@@ -253,6 +274,27 @@ final class DemoState: @unchecked Sendable {
         return result
     }
 
+    /// Builds the per-ingest config used for the rebuild path. Currently the
+    /// only thing it carries is whether to generate contextual chunk prefixes
+    /// via `FoundationModelsPrefixGenerator` (with a rule-based fallback when
+    /// Foundation Models is unavailable on the device).
+    private func makeFolioConfig() -> FolioConfig {
+        var config = FolioConfig()
+        config.indexing.useContextualPrefix = useContextualPrefixes
+
+        guard useContextualPrefixes else { return config }
+
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, *) {
+            let generator = FoundationModelsPrefixGenerator()
+            config.indexing.contextFn = { doc, page, chunk in
+                await generator.prefixWithFallback(for: doc, page: page, chunk: chunk)
+            }
+        }
+        #endif
+        return config
+    }
+
     private func makeEmbedderIfPossible() throws -> EmbeddingProvider? {
         switch embedderMode {
         case .none:
@@ -260,7 +302,7 @@ final class DemoState: @unchecked Sendable {
 
         case .embeddingGemmaCoreML:
             if #available(iOS 18.0, macOS 15.0, *) {
-                return EmbeddingGemmaProvider()
+                return gemmaProvider()
             } else {
                 throw NSError(
                     domain: "FolioDemo",
@@ -294,6 +336,41 @@ final class DemoState: @unchecked Sendable {
                 dimension: 1536,
                 apiKey: key
             ))
+        }
+    }
+
+    /// Lazily constructs and caches a single `EmbeddingGemmaProvider`. Reusing
+    /// the same actor across engine rebuilds means the Core ML model and warmed
+    /// ANE kernels stay loaded — re-ingests and backend switches don't pay the
+    /// ~4 s reload cost again.
+    @available(iOS 18.0, macOS 15.0, *)
+    private func gemmaProvider() -> EmbeddingGemmaProvider {
+        if let cached = cachedGemmaProvider as? EmbeddingGemmaProvider {
+            return cached
+        }
+        let provider = EmbeddingGemmaProvider()
+        cachedGemmaProvider = provider
+        return provider
+    }
+
+    /// Kick off the EmbeddingGemma cold start (download if needed, Core ML load,
+    /// ANE warm-up) in the background so the first user-facing `embed()` is
+    /// instant. Safe to call repeatedly — `EmbeddingGemmaProvider.prepare()` is
+    /// idempotent.
+    func warmUpEmbeddingGemmaIfNeeded() {
+        guard embedderMode == .embeddingGemmaCoreML else { return }
+        if #available(iOS 18.0, macOS 15.0, *) {
+            let provider = gemmaProvider()
+            Task {
+                do {
+                    try await provider.prepare()
+                    await MainActor.run { self.embeddingGemmaReady = true }
+                } catch {
+                    await MainActor.run {
+                        self.status = "EmbeddingGemma preload failed: \(error.localizedDescription)"
+                    }
+                }
+            }
         }
     }
 

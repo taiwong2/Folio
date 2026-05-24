@@ -94,6 +94,20 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.menu)
+            .onChange(of: state.embedderMode) { _, _ in
+                // Switching back into Core ML re-triggers the warm-up so the
+                // user doesn't pay the load cost on their first ask.
+                state.warmUpEmbeddingGemmaIfNeeded()
+            }
+
+            Toggle(isOn: bound.useContextualPrefixes) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Contextual prefixes").font(.callout)
+                    Text("Use Apple Foundation Models to write a short 'this chunk is about X' line per chunk before embedding. Better retrieval, ~1 s extra per chunk on first ingest.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
 
             switch state.embedderMode {
             case .none:
@@ -101,8 +115,21 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
 
             case .embeddingGemmaCoreML:
-                Text("Genuine on-device EmbeddingGemma 300M via Core ML + Apple Neural Engine. First use downloads the model bundle (~300 MB) to ~/Library/Application Support/Folio/models/ — subsequent calls are millisecond-scale.")
-                    .font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        if state.embeddingGemmaReady {
+                            Label("ready", systemImage: "checkmark.seal.fill")
+                                .font(.caption2).foregroundStyle(.green)
+                        } else {
+                            HStack(spacing: 4) {
+                                ProgressView().controlSize(.mini)
+                                Text("preparing model…").font(.caption2).foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    Text("Genuine on-device EmbeddingGemma 300M via Core ML + Apple Neural Engine. First use downloads the model bundle (~300 MB) to ~/Library/Application Support/Folio/models/. Warm-up runs in the background at app launch so your first ask is instant.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
 
             case .ollama:
                 VStack(alignment: .leading, spacing: 4) {
