@@ -78,6 +78,22 @@ public struct Citation: Sendable, Hashable, Codable {
     public let excerpt: String?
 }
 
+/// Stored chunk exposed for debugging / inspection. Mirrors the internal store
+/// row without leaking SQL-side types.
+public struct InspectableChunk: Sendable, Hashable {
+    public let chunkId: String
+    public let page: Int?
+    public let sectionTitle: String?
+    public let text: String
+
+    public init(chunkId: String, page: Int?, sectionTitle: String?, text: String) {
+        self.chunkId = chunkId
+        self.page = page
+        self.sectionTitle = sectionTitle
+        self.text = text
+    }
+}
+
 public struct DocumentFetch: Sendable {
     public let sourceId: String
     public let displayName: String
@@ -507,6 +523,16 @@ public final class FolioEngine {
     
     public func listSources() throws -> [Source] {
         try store.listSources()
+    }
+
+    /// Returns every chunk stored for `sourceId` in ingestion order. Intended for
+    /// demo / debugging surfaces (e.g. showing the user what the chunker produced
+    /// for a particular document) — production retrieval should go through
+    /// `search`, `searchWithContext`, or `searchHybrid` instead.
+    public func chunks(forSourceId sourceId: String) throws -> [InspectableChunk] {
+        try store.fetchAllChunks(forSourceId: sourceId).map { n in
+            InspectableChunk(chunkId: n.chunkId, page: n.page, sectionTitle: n.sectionTitle, text: n.text)
+        }
     }
     
     /// Retrieves relevant passages for `question`, builds a prompt with the configured
