@@ -17,10 +17,30 @@ final class DemoState: @unchecked Sendable {
         var id: String { rawValue }
     }
 
+    /// Which embedding backend the engine should be built with. Each option uses
+    /// the EmbeddingGemma 300M *model* where available so the comparison is
+    /// runtime-not-model: Ollama HTTP vs native MediaPipe vs OpenAI's cloud
+    /// embeddings as a separate baseline.
+    enum EmbedderMode: String, CaseIterable, Identifiable {
+        case none = "None (BM25 only)"
+        case ollama = "EmbeddingGemma via Ollama"
+        case mediaPipe = "EmbeddingGemma native (MediaPipe)"
+        case openAI = "OpenAI text-embedding-3-small"
+        var id: String { rawValue }
+    }
+
     // MARK: - Settings (user-editable)
     var backend: Backend = .openAI
     var openAIModel: String = "gpt-4o-mini"
     var openAIKey: String = ""
+    var embedderMode: EmbedderMode = .none
+    var ollamaEmbeddingModel: String = "embeddinggemma"
+    var ollamaBaseURL: String = "http://127.0.0.1:11434"
+    var openAIEmbeddingModel: String = "text-embedding-3-small"
+    /// Filesystem URL of the EmbeddingGemma `.task` file. Required when the user
+    /// picks the `.mediaPipe` embedder mode in builds that actually link the
+    /// MediaPipeTasksText framework (e.g. the hybrid Xcode demo).
+    var mediaPipeModelPath: URL?
 
     // MARK: - Conversation
     var question: String = "What is an actor in Swift?"
@@ -181,7 +201,8 @@ final class DemoState: @unchecked Sendable {
     @discardableResult
     private func rebuild(with ingest: LastIngest) async throws -> (pages: Int, chunks: Int) {
         let generator = makeGeneratorIfPossible()
-        let fresh = try FolioEngine.inMemory(textGenerator: generator)
+        let embedder = try makeEmbedderIfPossible()
+        let fresh = try FolioEngine.inMemory(embeddingProvider: embedder, textGenerator: generator)
 
         let result: (pages: Int, chunks: Int)
 
@@ -231,6 +252,57 @@ final class DemoState: @unchecked Sendable {
         engine = fresh
         lastIngest = ingest
         return result
+    }
+
+    private func makeEmbedderIfPossible() throws -> EmbeddingProvider? {
+        switch embedderMode {
+        case .none:
+            return nil
+
+        case .ollama:
+            guard let url = URL(string: ollamaBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw NSError(domain: "FolioDemo", code: 710, userInfo: [NSLocalizedDescriptionKey: "Invalid Ollama base URL"])
+            }
+            return EmbeddingGemmaEmbedder(configuration: .init(
+                baseURL: url,
+                model: ollamaEmbeddingModel,
+                dimension: 768
+            ))
+
+        case .openAI:
+            let key = openAIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else {
+                throw NSError(
+                    domain: "FolioDemo",
+                    code: 711,
+                    userInfo: [NSLocalizedDescriptionKey: "OpenAI embedding selected but no API key set above."]
+                )
+            }
+            return OpenAIStyleEmbedder(configuration: .init(
+                baseURL: URL(string: "https://api.openai.com")!,
+                model: openAIEmbeddingModel,
+                dimension: 1536,
+                apiKey: key
+            ))
+
+        case .mediaPipe:
+            #if canImport(MediaPipeTasksText)
+            guard let path = mediaPipeModelPath else {
+                throw NSError(
+                    domain: "FolioDemo",
+                    code: 713,
+                    userInfo: [NSLocalizedDescriptionKey: "Pick the EmbeddingGemma .task file first (Pick model file… in the embedder section)."]
+                )
+            }
+            return try MediaPipeTextEmbedderAdapter.embeddingGemma300m(modelPath: path)
+            #else
+            throw NSError(
+                domain: "FolioDemo",
+                code: 712,
+                userInfo: [NSLocalizedDescriptionKey: "MediaPipe EmbeddingGemma needs MediaPipeTasksText (CocoaPods only). This SPM build can't link it — use the hybrid Xcode demo in HybridExample/ instead."]
+            )
+            #endif
+        }
     }
 
     private func makeGeneratorIfPossible() -> TextGenerator? {

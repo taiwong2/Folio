@@ -105,6 +105,12 @@ public struct AnswerTemplate: Sendable {
 
     /// Default RAG template: a brief system prompt with citation instructions plus
     /// a numbered passage list followed by the user question.
+    ///
+    /// Uses `passage.text` (the full chunk content, with neighbor expansion if
+    /// retrieval enabled it) rather than `passage.excerpt` (FTS5's narrow snippet
+    /// window). The excerpt is meant for UI display — it often crops the matched
+    /// term itself, which leaves the model staring at incomplete context and
+    /// confidently reporting "the document does not mention X".
     public static let `default` = AnswerTemplate { question, passages in
         let system = """
         You are a careful assistant. Answer the user's question using ONLY the passages below.
@@ -118,7 +124,7 @@ public struct AnswerTemplate: Sendable {
             let source = passage.citations.first?.sourceName ?? passage.sourceId
             let section = passage.citations.first?.sectionTitle
             let header = section.map { "\(source) — \($0)" } ?? source
-            context += "[\(n)] (\(header))\n\(passage.excerpt)\n\n"
+            context += "[\(n)] (\(header))\n\(passage.text)\n\n"
         }
         context += "Question: \(question)"
 

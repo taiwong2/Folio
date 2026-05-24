@@ -1,0 +1,45 @@
+name: FolioHybridDemo
+options:
+  bundleIdPrefix: com.folio
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+packages:
+  Folio:
+    path: ..
+
+targets:
+  FolioHybridDemo:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      # Reuse the SPM demo's sources verbatim — `#if canImport(MediaPipeTasksText)`
+      # branches in DemoState / ContentView switch on automatically when Pods
+      # links MediaPipeTasksText against this target. (No `type: folder` — that
+      # would treat the directory as a resource bundle and skip compilation.)
+      - path: ../Example/Sources/FolioDemo
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Folio Hybrid Demo
+        UILaunchScreen:
+          UIColorName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    dependencies:
+      - package: Folio
+        product: Folio
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.folio.hybrid-demo
+        TARGETED_DEVICE_FAMILY: "1,2"

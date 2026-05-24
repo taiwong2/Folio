@@ -6,6 +6,7 @@ struct ContentView: View {
     @Environment(DemoState.self) private var state
     @State private var showingPicker = false
     @State private var showingInspector = false
+    @State private var showingModelPicker = false
 
     var body: some View {
         @Bindable var bound = state
@@ -15,6 +16,10 @@ struct ContentView: View {
                 .font(.title2.bold())
 
             backendSection(bound: $bound)
+
+            Divider()
+
+            embedderSection(bound: $bound)
 
             Divider()
 
@@ -51,6 +56,17 @@ struct ContentView: View {
         .sheet(isPresented: $showingInspector) {
             ChunkInspectorView(chunks: state.inspectedChunks, sourceName: state.currentSourceId)
         }
+        .fileImporter(
+            isPresented: $showingModelPicker,
+            // EmbeddingGemma ships as either `.task` (MediaPipe) or `.tflite` (LiteRT).
+            // Both register as `data` to UTType by default — accept broadly.
+            allowedContentTypes: [.data],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                state.mediaPipeModelPath = url
+            }
+        }
     }
 
     @ViewBuilder
@@ -76,6 +92,64 @@ struct ContentView: View {
                 Text("Runs entirely on-device when Foundation Models is available (iOS 26+/macOS 26+).")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func embedderSection(bound: Bindable<DemoState>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Embedder").font(.headline)
+            Picker("Embedder", selection: bound.embedderMode) {
+                ForEach(DemoState.EmbedderMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+
+            switch state.embedderMode {
+            case .none:
+                Text("Retrieval will use BM25 only — no vector search. Fast, no setup, but exact-word matches only.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+            case .ollama:
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Needs `ollama serve` running locally with `ollama pull embeddinggemma`.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        TextField("Ollama model", text: bound.ollamaEmbeddingModel)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 200)
+                        TextField("Base URL", text: bound.ollamaBaseURL)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+
+            case .mediaPipe:
+                #if canImport(MediaPipeTasksText)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("On-device EmbeddingGemma via MediaPipeTasksText. Provide the model `.task` file (download from huggingface.co/litert-community/embeddinggemma-300m).")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Pick model file…") { showingModelPicker = true }
+                        Text(state.mediaPipeModelPath?.lastPathComponent ?? "no model selected")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(state.mediaPipeModelPath == nil ? .orange : .green)
+                    }
+                }
+                #else
+                Text("⚠ Native MediaPipe runtime needs MediaPipeTasksText (CocoaPods only) — not linkable from this SPM demo. Use the hybrid Xcode demo in HybridExample/ for the real runtime.")
+                    .font(.caption).foregroundStyle(.orange)
+                #endif
+
+            case .openAI:
+                HStack {
+                    TextField("OpenAI embedding model", text: bound.openAIEmbeddingModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 280)
+                    Text("Uses the OpenAI API key from above.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
