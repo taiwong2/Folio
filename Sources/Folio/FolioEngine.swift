@@ -139,6 +139,70 @@ public final class FolioEngine {
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
     }
 
+    /// Convenience: ingest the file at `url`, deriving `sourceId` from its last path
+    /// component. Returns the derived id so callers can keep it around for follow-up
+    /// queries / deletion. Loader is picked by UTI from the file extension; pass an
+    /// explicit `sourceId` to override the derived value.
+    @discardableResult
+    public func ingest(url: URL, sourceId: String? = nil, config: FolioConfig = .init(), tags: Set<String>? = nil) throws -> String {
+        let resolvedSourceId = sourceId ?? url.lastPathComponent
+        let input = try Self.makeIngestInput(from: url)
+        _ = try ingest(input, sourceId: resolvedSourceId, config: config, tags: tags)
+        return resolvedSourceId
+    }
+
+    /// Convenience: ingest a plain-text blob with caller-provided `name` (used as both
+    /// the display name and the derived `sourceId`).
+    @discardableResult
+    public func ingest(text: String, name: String, config: FolioConfig = .init(), tags: Set<String>? = nil) throws -> String {
+        _ = try ingest(.text(text, name: name), sourceId: name, config: config, tags: tags)
+        return name
+    }
+
+    /// Convenience: retrieve passages for `question` using whichever path is best given
+    /// the engine's configuration. Hybrid (BM25 + cosine) when an embedding provider is
+    /// configured, lexical-only otherwise. Returns `RetrievedResult` so callers see the
+    /// same shape regardless of which retrieval ran.
+    public func retrieve(_ question: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, expandToParent: Bool = false, mmr: MMRConfig? = nil) async throws -> [RetrievedResult] {
+        let sanitized = Self.sanitizeForFTS(question)
+        if embeddingProvider != nil {
+            return try await searchHybrid(sanitized, in: sourceId, filter: filter, limit: limit, expand: expand, expandToParent: expandToParent, mmr: mmr)
+        } else {
+            let passages = try searchWithContext(sanitized, in: sourceId, filter: filter, limit: limit, expand: expand, expandToParent: expandToParent)
+            return mapPassagesToResults(passages)
+        }
+    }
+
+    /// Picks an `IngestInput` for a file URL by reading the data and tagging it with
+    /// the best UTI we can infer from the path extension. Falls back to plain text for
+    /// extensions we don't recognise so callers can still index miscellaneous notes.
+    private static func makeIngestInput(from url: URL) throws -> IngestInput {
+        let ext = url.pathExtension.lowercased()
+        if ext == "pdf" { return .pdf(url) }
+
+        let data = try Data(contentsOf: url)
+        let uti: String?
+        switch ext {
+        case "txt", "log": uti = nil // route through .text path
+        case "md", "markdown": uti = "public.markdown"
+        case "docx": uti = "org.openxmlformats.wordprocessingml.document"
+        case "png": uti = "public.png"
+        case "jpg", "jpeg": uti = "public.jpeg"
+        case "heic", "heif": uti = "public.heic"
+        case "tiff", "tif": uti = "public.tiff"
+        case "gif": uti = "com.compuserve.gif"
+        case "webp": uti = "org.webmproject.webp"
+        default: uti = nil
+        }
+
+        if let uti {
+            return .data(data, uti: uti, name: url.lastPathComponent)
+        } else {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            return .text(text, name: url.lastPathComponent)
+        }
+    }
+
     public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws -> FolioEngine {
         let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
@@ -745,8 +809,9 @@ public final class FolioEngine {
         let request = GenerationRequest(messages: messages, temperature: temperature, maxTokens: maxTokens)
         let text = try await generator.generate(request)
         let citations = resolveCitationMarkers(in: text, passages: passages)
+        let confidence = computeAnswerConfidence(in: text, passages: passages)
 
-        return Answer(text: text, citations: citations, usedPassages: passages)
+        return Answer(text: text, citations: citations, usedPassages: passages, confidence: confidence)
     }
 
     /// Streaming variant of `answer`. Emits the retrieved passages up front, then
@@ -793,7 +858,8 @@ public final class FolioEngine {
                 }
 
                 let citations = resolveCitationMarkers(in: accumulated, passages: passages)
-                continuation.yield(.done(Answer(text: accumulated, citations: citations, usedPassages: passages)))
+                let confidence = computeAnswerConfidence(in: accumulated, passages: passages)
+                continuation.yield(.done(Answer(text: accumulated, citations: citations, usedPassages: passages, confidence: confidence)))
                 continuation.finish()
             }
 

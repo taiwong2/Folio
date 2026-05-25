@@ -69,18 +69,47 @@ public extension TextGenerator {
 }
 
 /// Final output of `FolioEngine.answer()`: the model's text, any citations resolved
-/// from inline `[N]` markers, and the underlying retrieval result list (including
-/// per-passage scores) so consumers can compute their own confidence policies.
+/// from inline `[N]` markers, the underlying retrieval result list (including
+/// per-passage scores), and a heuristic `confidence` score in `[0, 1]`.
+///
+/// `confidence` is the mean fused score (`RetrievedResult.score`) of the passages
+/// the model actually cited. It returns `0` when the model emitted no citation
+/// markers — that's the strongest cue the answer is ungrounded — and when no
+/// passages were retrieved. The score is a heuristic, not a calibrated
+/// probability, so callers should treat thresholds as policy choices rather than
+/// statistical claims.
 public struct Answer: Sendable {
     public let text: String
     public let citations: [Citation]
     public let usedPassages: [RetrievedResult]
+    public let confidence: Double
 
-    public init(text: String, citations: [Citation], usedPassages: [RetrievedResult]) {
+    public init(text: String, citations: [Citation], usedPassages: [RetrievedResult], confidence: Double) {
         self.text = text
         self.citations = citations
         self.usedPassages = usedPassages
+        self.confidence = confidence
     }
+}
+
+/// Computes the `Answer.confidence` value from the model's text and the passages it
+/// was given. Looks up each `[N]` marker against `passages`, averages the fused
+/// scores of the unique passages cited, and clamps to `[0, 1]`. Returns `0` when no
+/// markers were emitted or no passages exist.
+func computeAnswerConfidence(in text: String, passages: [RetrievedResult]) -> Double {
+    guard !passages.isEmpty else { return 0 }
+    let regex = /\[(\d+)\]/
+    var citedScores: [Double] = []
+    var seen = Set<Int>()
+    for match in text.matches(of: regex) {
+        guard let n = Int(match.output.1), n > 0, n <= passages.count else { continue }
+        if seen.insert(n).inserted {
+            citedScores.append(passages[n - 1].score)
+        }
+    }
+    guard !citedScores.isEmpty else { return 0 }
+    let mean = citedScores.reduce(0, +) / Double(citedScores.count)
+    return max(0, min(1, mean))
 }
 
 /// Streaming event emitted by `FolioEngine.answerStream()`. Carries the retrieved

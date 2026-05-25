@@ -6,10 +6,12 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 
 ## Current Features
 
-- PDF and plain text ingestion
-- PDF text extraction with Vision OCR fallback when available
-- Universal text chunking
-- Header and footer cleanup
+- PDF, plain text, Markdown, DOCX, and image ingestion
+- PDF text extraction with Vision OCR fallback; standalone image OCR via Vision
+- Universal text chunking with markdown heading awareness and header/footer cleanup
+- Parent-section retrieval (`expandToParent`) so a small chunk match can return the full enclosing section
+- Document-level tags (`source_tags`) and a `RetrievalFilter.tags` clause
+- Async ingestion with cooperative cancellation and `IngestProgress` callbacks
 - SQLite storage with FTS5 BM25 search
 - Contextual prefix hooks and prefix cache
 - Apple Foundation Models prefix helper when `FoundationModels` is available on iOS 26+ or macOS 26+
@@ -18,19 +20,19 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - Local-server EmbeddingGemma via Ollama (`EmbeddingGemmaEmbedder`)
 - OpenAI-compatible embedding adapter (`OpenAIStyleEmbedder`) for hosted providers or local servers
 - Public `FakeEmbeddingProvider` for consumer-side tests
-- Hybrid retrieval prototype using BM25 candidates, cosine scoring, rank fusion, and neighbor expansion
+- BM25 search (`search`), pure vector search (`searchVectors`), and hybrid retrieval (`searchHybrid`) — all support neighbor expansion, parent-section expansion, metadata filters, and optional MMR diversification
 - OpenAI-compatible chat completions client (with SSE streaming) for local runtimes or hosted providers
 - Pluggable `TextGenerator` protocol with backends for OpenAI-compatible cloud (`OpenAIStyleGenerator.cloud(...)`), Apple Foundation Models (`FoundationTextGenerator`), and a `FakeTextGenerator` for tests
-- High-level `engine.answer(_:)` / `engine.answerStream(_:)` that retrieve, prompt, generate, and resolve inline citation markers in one call
+- High-level `engine.answer(_:)` / `engine.answerStream(_:)` that retrieve, prompt, generate, and resolve inline citation markers in one call — returning `Answer.text`, `.citations`, `.usedPassages`, and a heuristic `.confidence`
+- One-line ingest helpers: `engine.ingest(url:)`, `engine.ingest(text:name:)`, `engine.retrieve(_:)`
 
 ## Planned Features
 
-- DOCX ingestion
-- Image indexing beyond PDF OCR fallback
-- On-device LLM generation (Gemma / Qwen / etc.) — currently best served through `OpenAIStyleGenerator.cloud(.ollama(...))` against a local Ollama; an in-process Core ML generator is potential future work
-- Full vector candidate search instead of BM25-first hybrid retrieval
+- More file types (HTML/RTF/CSV/XLSX/PPTX/ZIP)
+- In-process on-device LLM generation (LiteRT-LM Gemma) — blocked on SPM packaging; today the on-device path is `FoundationTextGenerator` (iOS 26+/macOS 26+) and `OpenAIStyleGenerator.cloud(.ollama(...))` for a local Ollama
 - Native (non-OpenAI-compat) Anthropic and Gemini generators for provider-specific features
-- MMR diversification, reranking, and confidence-policy helpers
+- Reranking, HyDE, query rewriting, refusal/confidence policy helpers
+- Eval fixtures and retrieval metrics
 
 ## Installation
 
@@ -57,15 +59,42 @@ import Folio
 
 let folio = try FolioEngine.inMemory()
 
-try folio.ingest(
-    .text("hello world from folio", name: "note.txt"),
-    sourceId: "T1"
-)
+// One-liner convenience: derives sourceId from name.
+let id = try folio.ingest(text: "hello world from folio", name: "note.txt")
 
-let hits = try folio.search("hello", in: "T1", limit: 5)
+let hits = try folio.search("hello", in: id, limit: 5)
 for hit in hits {
     print("\(hit.sourceId): \(hit.excerpt)")
 }
+
+// `ingest(url:)` accepts a file URL and picks the right loader by extension:
+let id2 = try folio.ingest(url: URL(fileURLWithPath: "/path/to/notes.pdf"))
+
+// `retrieve(_:)` picks hybrid when an embedding provider is configured, lexical otherwise:
+let results = try await folio.retrieve("hello", in: id)
+```
+
+## Ingestion Formats
+
+`engine.ingest(url:)` reads the file and picks a loader by extension:
+
+| Extension | Loader |
+|-----------|--------|
+| `.pdf` | `PDFDocumentLoader` (PDFKit + Vision OCR fallback) |
+| `.md`, `.markdown` | `MarkdownDocumentLoader` |
+| `.docx` | `DOCXDocumentLoader` (in-process unzip + WordprocessingML walk) |
+| `.png` / `.jpg` / `.heic` / `.tiff` / `.gif` / `.webp` | `ImageDocumentLoader` (Vision OCR) |
+| `.txt`, `.log`, anything else | `TextDocumentLoader` |
+
+You can also pass raw bytes via `.data(Data, uti: …, name: …)` and matching loaders will pick them up by UTI. Long ingests can be cancelled by cancelling the enclosing task and report progress with a `progress:` closure:
+
+```swift
+let task = Task {
+    try await folio.ingestAsync(.pdf(url), sourceId: "manual") { p in
+        print("phase: \(p.phase), \(p.completed)/\(p.total ?? -1)")
+    }
+}
+// task.cancel()  // stops the loop between chunks
 ```
 
 ## PDF Ingestion
@@ -145,6 +174,24 @@ if #available(iOS 26.0, macOS 26.0, *) {
 }
 ```
 
+## Tags
+
+Tag a source at ingest time or after the fact, then filter retrieval by tag:
+
+```swift
+_ = try folio.ingest(.text(body, name: "note.md"), sourceId: "note", tags: ["draft", "research"])
+try folio.setTags(["published"], forSource: "note")
+let stored = try folio.tags(forSource: "note")
+
+let drafts = try folio.searchWithContext(
+    "retrieval",
+    filter: .init(tags: ["draft"]),
+    limit: 10
+)
+```
+
+Tags are document-level, OR-matched against the requested set, and dropped automatically when the source is deleted.
+
 ## Hybrid Retrieval
 
 Pass an `EmbeddingProvider` to `FolioEngine`, ingest with `ingestAsync`, and backfill missing vectors when needed. Each provider declares its `EmbeddingModelInfo` (id + dimension) so Folio refuses to mix vectors from incompatible models in the same index.
@@ -205,6 +252,50 @@ try await engine.backfillEmbeddings()
 
 `Configuration.dimension` is required and must match the model's output size; it gets persisted to the `embedding_indexes` table and validated on every write.
 
+### Pure vector search
+
+When you want vector-only ranking (paraphrase queries, cross-lingual recall, or anything where BM25 contributes noise), call `searchVectors` — it skips FTS entirely and scores every chunk in the configured embedding index by cosine:
+
+```swift
+let results = try await folio.searchVectors(
+    "how do I configure retries?",
+    in: "manual",
+    limit: 5,
+    expand: 1
+)
+```
+
+`searchVectors` accepts the same `RetrievalFilter`, `expandToParent`, and `mmr:` options as `searchHybrid`. It throws code 412 if no `EmbeddingProvider` is wired.
+
+### MMR diversification
+
+Pass an `MMRConfig` to either `searchHybrid` or `searchVectors` to re-rank the top candidates so near-duplicates don't crowd the result list:
+
+```swift
+let results = try await folio.searchHybrid(
+    "retries",
+    in: "manual",
+    limit: 5,
+    mmr: MMRConfig(lambda: 0.5, k: 20)
+)
+```
+
+`lambda` trades relevance (1.0) against novelty (0.0); `k` is the candidate pool MMR re-ranks before the top `limit` are returned.
+
+### Parent-section expansion
+
+When the chunker has produced a parent/child layout (e.g. markdown headings), `expandToParent: true` returns the full enclosing section instead of just the matched chunk plus a small neighbour window. Useful when you retrieve on a small chunk but want to feed the model the full context:
+
+```swift
+let results = try folio.searchWithContext(
+    "retries",
+    in: "manual",
+    limit: 3,
+    expand: 0,
+    expandToParent: true
+)
+```
+
 ### Tests without a real embedder
 
 `FakeEmbeddingProvider` produces deterministic vectors from a hash of the input. Use it in your own tests so retrieval paths can run without standing up a model:
@@ -229,7 +320,10 @@ let result = try await engine.answer("how do I configure retries?", in: "manual"
 print(result.text)             // model's answer, with [1], [2], … markers preserved
 print(result.citations)        // resolved Citation list in the order the markers appear
 print(result.usedPassages)     // RetrievedResult list with BM25 + cosine + fused scores
+print(result.confidence)       // heuristic in [0, 1]: mean fused score of cited passages
 ```
+
+`confidence` is a heuristic, not a calibrated probability — it's the mean fused score of the passages the model actually cited, clamped to `[0, 1]`. Answers without any `[N]` markers (or with no retrieved passages) return `0`, which is the strongest signal that the answer isn't grounded. Treat thresholds as policy, not statistics.
 
 Streaming uses the same shape but yields an `AnswerStreamEvent` stream — `.passages(...)` first, then `.text(delta)` fragments, then `.done(Answer)`:
 
@@ -331,6 +425,7 @@ Migrations are bundled as SPM resources and applied at runtime:
 - `003_indexes.sql`: indexes
 - `004_prefix_cache.sql`: contextual prefix cache
 - `005_embeddings.sql`: vector storage
+- `006_tags.sql`: document-level `source_tags`
 
 ## License
 
