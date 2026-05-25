@@ -39,6 +39,7 @@ extension DocChunkStore {
         public let sourceFileType: String?
         public let page: Int?
         public let sectionTitle: String?
+        public let parentId: String?
         public let excerpt: String
         public let bm25: Double
     }
@@ -145,6 +146,7 @@ extension DocChunkStore {
               s.file_type AS source_file_type,
               d.page AS page,
               d.section_title AS section_title,
+              d.parent_id AS parent_id,
               REPLACE(
                 snippet(doc_chunks_fts, 0, '', '', '…', 18),
                 COALESCE(d.context_prefix || ' ', ''),
@@ -178,13 +180,14 @@ extension DocChunkStore {
                     sourceFileType: $0["source_file_type"],
                     page: $0["page"],
                     sectionTitle: $0["section_title"],
+                    parentId: $0["parent_id"],
                     excerpt: $0["excerpt"],
                     bm25: $0["score"]
                 )
             }
         }
     }
-    
+
     func fetchNeighbors(sourceId: String, around rowid: Int64, expand: Int) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let prevRows = try Row.fetchAll(db, sql: """
@@ -265,6 +268,33 @@ extension DocChunkStore {
                     page: row["page"],
                     sectionTitle: row["section_title"],
                     parentId: row["parent_id"]
+                )
+            }
+        }
+    }
+
+    /// All chunks under the given `parentId`, in storage order. Used by parent-section
+    /// expansion so a small chunk match can be returned with the full parent section
+    /// as context.
+    func fetchChunksByParent(sourceId: String, parentId: String) throws -> [NeighborChunk] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT rowid, id AS chunk_id, content, page, section_title, parent_id,
+                       COALESCE(context_prefix, '') AS context_prefix
+                FROM doc_chunks
+                WHERE source_id = ? AND parent_id = ?
+                ORDER BY rowid ASC
+            """, arguments: [sourceId, parentId])
+
+            return rows.map { row in
+                NeighborChunk(
+                    rowid: row["rowid"],
+                    chunkId: row["chunk_id"],
+                    text: row["content"],
+                    page: row["page"],
+                    sectionTitle: row["section_title"],
+                    parentId: row["parent_id"],
+                    contextPrefix: row["context_prefix"]
                 )
             }
         }
@@ -396,6 +426,66 @@ extension DocChunkStore {
                 var arr = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
                 _ = arr.withUnsafeMutableBytes { data.copyBytes(to: $0) }
                 return VectorRow(rowid: r["rowid"], chunkId: r["chunk_id"], dim: dim, vec: arr)
+            }
+        }
+    }
+
+    /// Joined chunk + vector + source row used by `searchVectors` to score the whole
+    /// index by cosine without an FTS prefilter. Held in memory because pure vector
+    /// search has no SQL-side ranking to push the work into.
+    public struct VectorChunkRow: Sendable {
+        public let rowid: Int64
+        public let chunkId: String
+        public let sourceId: String
+        public let sourceDisplayName: String
+        public let sourceFileType: String?
+        public let page: Int?
+        public let sectionTitle: String?
+        public let parentId: String?
+        public let text: String
+        public let vector: [Float]
+    }
+
+    func fetchAllVectorsWithChunks(indexId: String, inSource sourceId: String?, filter: RetrievalFilter) throws -> [VectorChunkRow] {
+        try dbQueue.read { db in
+            var sql = """
+                SELECT d.rowid AS rowid, d.id AS chunk_id, d.source_id AS source_id,
+                       s.display_name AS source_display_name, s.file_type AS source_file_type,
+                       d.page AS page, d.section_title AS section_title, d.parent_id AS parent_id,
+                       d.content AS content, v.vec AS vec, v.dim AS dim
+                FROM doc_chunks AS d
+                JOIN sources AS s ON s.id = d.source_id
+                JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id
+                WHERE v.index_id = ?
+            """
+            var args: [DatabaseValueConvertible] = [indexId]
+
+            if let s = sourceId {
+                sql += " AND d.source_id = ?"
+                args.append(s)
+            }
+
+            appendFilterSQL(filter, sql: &sql, args: &args)
+
+            sql += " ORDER BY d.rowid ASC"
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            return rows.map { r in
+                let data: Data = r["vec"]
+                var arr = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+                _ = arr.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+                return VectorChunkRow(
+                    rowid: r["rowid"],
+                    chunkId: r["chunk_id"],
+                    sourceId: r["source_id"],
+                    sourceDisplayName: r["source_display_name"],
+                    sourceFileType: r["source_file_type"],
+                    page: r["page"],
+                    sectionTitle: r["section_title"],
+                    parentId: r["parent_id"],
+                    text: r["content"],
+                    vector: arr
+                )
             }
         }
     }
@@ -589,6 +679,30 @@ internal struct DocChunkStore {
         }
     }
 
+    func replaceTags(forSourceId sourceId: String, tags: Set<String>) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM source_tags WHERE source_id = ?", arguments: [sourceId])
+            for tag in tags {
+                let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                try db.execute(
+                    sql: "INSERT OR IGNORE INTO source_tags(source_id, tag) VALUES (?, ?)",
+                    arguments: [sourceId, trimmed]
+                )
+            }
+        }
+    }
+
+    func tags(forSourceId sourceId: String) throws -> [String] {
+        try dbQueue.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT tag FROM source_tags WHERE source_id = ? ORDER BY tag ASC",
+                arguments: [sourceId]
+            )
+        }
+    }
+
     func deleteChunks(forSourceId base: String) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM doc_chunks WHERE source_id = ? OR source_id LIKE ?", arguments: [base, "\(base) p.%"])
@@ -622,6 +736,14 @@ private func appendFilterSQL(_ filter: RetrievalFilter, sql: inout String, args:
         sql += " AND d.page BETWEEN ? AND ?"
         args.append(pageRange.lowerBound)
         args.append(pageRange.upperBound)
+    }
+
+    if let tags = filter.tags, !tags.isEmpty {
+        // EXISTS keeps the result row distinct without GROUP BY gymnastics; document
+        // matches the filter when at least one of its tags is in the requested set.
+        let sortedTags = tags.sorted()
+        sql += " AND EXISTS (SELECT 1 FROM source_tags WHERE source_tags.source_id = d.source_id AND source_tags.tag IN (\(placeholders(count: sortedTags.count))))"
+        args.append(contentsOf: sortedTags)
     }
 }
 

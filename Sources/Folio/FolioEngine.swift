@@ -39,11 +39,13 @@ public struct RetrievalFilter: Sendable, Hashable {
     public var sourceIds: Set<String>?
     public var fileTypes: Set<String>?
     public var pageRange: ClosedRange<Int>?
+    public var tags: Set<String>?
 
-    public init(sourceIds: Set<String>? = nil, fileTypes: Set<String>? = nil, pageRange: ClosedRange<Int>? = nil) {
+    public init(sourceIds: Set<String>? = nil, fileTypes: Set<String>? = nil, pageRange: ClosedRange<Int>? = nil, tags: Set<String>? = nil) {
         self.sourceIds = sourceIds
         self.fileTypes = fileTypes
         self.pageRange = pageRange
+        self.tags = tags
     }
 }
 
@@ -157,7 +159,7 @@ public final class FolioEngine {
     
     //Ingest any supported input with caller chosen sourceID
     @discardableResult
-    public func ingest(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) throws -> (pages: Int, chunks: Int) {
+    public func ingest(_ input: IngestInput, sourceId: String, config: FolioConfig = .init(), tags: Set<String>? = nil) throws -> (pages: Int, chunks: Int) {
         guard let loader = loaders.first(where: { $0.supports(input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
@@ -215,11 +217,12 @@ public final class FolioEngine {
             pages: doc.pages.count,
             chunks: inserted
         )
+        if let tags { try? store.replaceTags(forSourceId: sourceId, tags: tags) }
 
         return (doc.pages.count, inserted)
     }
-    
-    
+
+
     /// Async ingest with cooperative cancellation and optional progress reporting.
     ///
     /// `progress` (if supplied) fires with `.loading` after the loader returns, `.chunking`
@@ -231,6 +234,7 @@ public final class FolioEngine {
         _ input: IngestInput,
         sourceId: String,
         config: FolioConfig = .init(),
+        tags: Set<String>? = nil,
         progress: IngestProgressHandler? = nil
     ) async throws -> (pages: Int, chunks: Int) {
 
@@ -330,27 +334,38 @@ public final class FolioEngine {
             pages: doc.pages.count,
             chunks: inserted
         )
+        if let tags { try? store.replaceTags(forSourceId: sourceId, tags: tags) }
         return (doc.pages.count, inserted)
     }
-    
+
+    /// Replaces the tags attached to a source. Pass an empty set to clear all tags.
+    public func setTags(_ tags: Set<String>, forSource sourceId: String) throws {
+        try store.replaceTags(forSourceId: sourceId, tags: tags)
+    }
+
+    /// Returns the tags attached to a source in ascending order.
+    public func tags(forSource sourceId: String) throws -> [String] {
+        try store.tags(forSourceId: sourceId)
+    }
+
     @discardableResult
-    public func searchWithContext(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage] {
+    public func searchWithContext(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, expandToParent: Bool = false) throws -> [RetrievedPassage] {
         precondition(limit > 0, "Limit needs to be greater than 0")
         precondition(expand >= 0, "Expand must be non-negative")
 
         let hits = try store.ftsHits(query: query, inSource: sourceId, filter: filter, limit: max(limit * 6, 60))
-        
+
         var results: [RetrievedPassage] = []
         var usedRowids = Set<Int64>()
-        
+
         for h in hits {
             guard !usedRowids.contains(h.rowid) else { continue }
-            
-            let window = try store.fetchNeighbors(sourceId: h.sourceId, around: h.rowid, expand: expand)
+
+            let window = try contextWindow(for: h, expand: expand, expandToParent: expandToParent)
             guard !window.isEmpty else { continue }
-            
+
             window.forEach { usedRowids.insert($0.rowid) }
-            
+
             let mergedText = window.map(\.text).joined(separator: "\n\n")
             let startPage = window.first?.page
             let citations = window.map {
@@ -365,13 +380,25 @@ public final class FolioEngine {
                     excerpt: h.excerpt
                 )
             }
-            
+
             results.append(RetrievedPassage(sourceId: h.sourceId, startPage: startPage, excerpt: h.excerpt, text: mergedText, bm25: h.bm25, citations: citations))
             if results.count >= limit { break }
 
         }
-        
+
         return results
+    }
+
+    /// Picks the chunks around a hit. If `expandToParent` is true and the hit's chunk
+    /// declares a `parent_id`, returns every chunk under that parent — letting callers
+    /// retrieve on a small chunk but answer with the larger surrounding section. Falls
+    /// back to neighbor expansion when the chunk is parent-less.
+    private func contextWindow(for hit: DocChunkStore.SnippetHit, expand: Int, expandToParent: Bool) throws -> [DocChunkStore.NeighborChunk] {
+        if expandToParent, let parentId = hit.parentId {
+            let parentChunks = try store.fetchChunksByParent(sourceId: hit.sourceId, parentId: parentId)
+            if !parentChunks.isEmpty { return parentChunks }
+        }
+        return try store.fetchNeighbors(sourceId: hit.sourceId, around: hit.rowid, expand: expand)
     }
 
     public func fetchDocument(sourceId: String, startPage: Int? = nil, anchor: String? = nil, expand: Int = 2, maxChars: Int? = 8000) throws -> DocumentFetch {
@@ -455,7 +482,7 @@ public final class FolioEngine {
         }
     }
 
-    public func searchHybrid(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) async throws -> [RetrievedResult] {
+    public func searchHybrid(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5, expandToParent: Bool = false, mmr: MMRConfig? = nil) async throws -> [RetrievedResult] {
         precondition(limit > 0 && expand >= 0, "invalid params")
 
         let hits = try store.ftsHits(query: query, inSource: sourceId, filter: filter, limit: max(limit * 6, 60))
@@ -487,33 +514,46 @@ public final class FolioEngine {
         }
         
         let allBM = hits.map(\.bm25)
-        
+
         struct Cand {
             let h: DocChunkStore.SnippetHit
             let fused: Double
             let cos: Double?
+            let vec: [Float]?
         }
-        
-        let ranked = hits.map { h -> Cand in
+
+        var vectorByRow: [Int64: [Float]] = [:]
+        if embeddingProvider != nil {
+            let rows = try store.fetchVectors(forRowids: hits.map { $0.rowid }, indexId: Self.defaultIndexId)
+            vectorByRow = Dictionary(uniqueKeysWithValues: rows.map { ($0.rowid, $0.vec) })
+        }
+
+        let fusionRanked = hits.map { h -> Cand in
             let cos = cosByRow[h.rowid]
             let fused = RankFusion.fuse(bm25: allBM, bm25: h.bm25, cosine: cos, wBM25: wBM25)
-            
-            return Cand(h: h, fused: fused, cos: cos)
+            return Cand(h: h, fused: fused, cos: cos, vec: vectorByRow[h.rowid])
         }.sorted { $0.fused > $1.fused }
-        
+
+        let ranked: [Cand]
+        if let mmr {
+            ranked = MMR.rerank(fusionRanked, lambda: mmr.lambda, k: mmr.k ?? limit, relevance: { $0.fused }, vector: { $0.vec })
+        } else {
+            ranked = fusionRanked
+        }
+
         var out: [RetrievedResult] = []
         var used = Set<Int64>()
-        
+
         for c in ranked {
             guard !used.contains(c.h.rowid) else {
                 continue
             }
-            
-            let window = try store.fetchNeighbors(sourceId: c.h.sourceId, around: c.h.rowid, expand: expand)
+
+            let window = try contextWindow(for: c.h, expand: expand, expandToParent: expandToParent)
             guard !window.isEmpty else {
                 continue
             }
-            
+
             window.forEach { used.insert($0.rowid) }
             let citations = window.map {
                 Citation(
@@ -528,18 +568,121 @@ public final class FolioEngine {
                 )
             }
             out.append(.init(sourceId: c.h.sourceId, startPage: window.first?.page, excerpt: c.h.excerpt, text: window.map(\.text).joined(separator: "\n\n"), bm25: c.h.bm25, cosine: c.cos, score: c.fused, citations: citations))
-            
+
             if out.count >= limit {
                 break
             }
         }
-    
+
         return out
     }
 
     
     public func search(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 10) throws -> [Snippet] {
         try store.ftsSnippets(query: query, inSource: sourceId, filter: filter, limit: limit)
+    }
+
+    /// Pure vector retrieval: cosine over every chunk in the configured embedding
+    /// index, ignoring BM25 entirely. Useful for queries the lexical side can't help
+    /// with (paraphrase, cross-lingual, "find documents about X" without keyword
+    /// overlap). Throws if no embedding provider is configured.
+    public func searchVectors(_ query: String, in sourceId: String? = nil, filter: RetrievalFilter = .init(), limit: Int = 5, expand: Int = 1, expandToParent: Bool = false, mmr: MMRConfig? = nil) async throws -> [RetrievedResult] {
+        precondition(limit > 0 && expand >= 0, "invalid params")
+        guard let embeddingProvider else {
+            throw NSError(domain: "Folio", code: 412, userInfo: [NSLocalizedDescriptionKey: "searchVectors requires an EmbeddingProvider"])
+        }
+
+        let rows = try store.fetchAllVectorsWithChunks(indexId: Self.defaultIndexId, inSource: sourceId, filter: filter)
+        if rows.isEmpty { return [] }
+
+        let queryVec = try await embeddingProvider.embed(query)
+
+        struct VCand {
+            let row: DocChunkStore.VectorChunkRow
+            let cosine: Double
+        }
+
+        let scored = rows.map { row -> VCand in
+            VCand(row: row, cosine: Self.cosine(row.vector, queryVec))
+        }.sorted { $0.cosine > $1.cosine }
+
+        let ranked: [VCand]
+        if let mmr {
+            ranked = MMR.rerank(scored, lambda: mmr.lambda, k: mmr.k ?? limit, relevance: { $0.cosine }, vector: { $0.row.vector })
+        } else {
+            ranked = scored
+        }
+
+        var out: [RetrievedResult] = []
+        var used = Set<Int64>()
+
+        for c in ranked {
+            guard !used.contains(c.row.rowid) else { continue }
+
+            let hit = DocChunkStore.SnippetHit(
+                rowid: c.row.rowid,
+                chunkId: c.row.chunkId,
+                sourceId: c.row.sourceId,
+                sourceDisplayName: c.row.sourceDisplayName,
+                sourceFileType: c.row.sourceFileType,
+                page: c.row.page,
+                sectionTitle: c.row.sectionTitle,
+                parentId: c.row.parentId,
+                excerpt: Self.synthesizeExcerpt(from: c.row.text),
+                bm25: 0
+            )
+
+            let window = try contextWindow(for: hit, expand: expand, expandToParent: expandToParent)
+            guard !window.isEmpty else { continue }
+
+            window.forEach { used.insert($0.rowid) }
+
+            let citations = window.map {
+                Citation(
+                    sourceId: hit.sourceId,
+                    sourceName: hit.sourceDisplayName,
+                    fileType: hit.sourceFileType,
+                    page: $0.page,
+                    sectionTitle: $0.sectionTitle,
+                    chunkId: $0.chunkId,
+                    parentId: $0.parentId,
+                    excerpt: hit.excerpt
+                )
+            }
+
+            out.append(RetrievedResult(
+                sourceId: hit.sourceId,
+                startPage: window.first?.page,
+                excerpt: hit.excerpt,
+                text: window.map(\.text).joined(separator: "\n\n"),
+                bm25: 0,
+                cosine: c.cosine,
+                score: c.cosine,
+                citations: citations
+            ))
+
+            if out.count >= limit { break }
+        }
+
+        return out
+    }
+
+    private static func cosine(_ a: [Float], _ b: [Float]) -> Double {
+        let n = min(a.count, b.count)
+        var dot = 0.0, na = 0.0, nb = 0.0
+        for i in 0..<n {
+            let x = Double(a[i]), y = Double(b[i])
+            dot += x * y
+            na += x * x
+            nb += y * y
+        }
+        return (na == 0 || nb == 0) ? 0 : dot / (sqrt(na) * sqrt(nb))
+    }
+
+    private static func synthesizeExcerpt(from text: String, maxChars: Int = 200) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count <= maxChars { return trimmed }
+        return String(trimmed.prefix(maxChars)) + "…"
     }
     
     public func deleteSource(_ sourceId: String) throws {
