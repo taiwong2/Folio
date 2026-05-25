@@ -22,14 +22,13 @@ The package targets iOS 26+ for apps and macOS 26+ so the package can build and 
 - Public `FakeEmbeddingProvider` for consumer-side tests
 - BM25 search (`search`), pure vector search (`searchVectors`), and hybrid retrieval (`searchHybrid`) — all support neighbor expansion, parent-section expansion, metadata filters, and optional MMR diversification
 - OpenAI-compatible chat completions client (with SSE streaming) for local runtimes or hosted providers
-- Pluggable `TextGenerator` protocol with backends for OpenAI-compatible cloud (`OpenAIStyleGenerator.cloud(...)`), Apple Foundation Models (`FoundationTextGenerator`), and a `FakeTextGenerator` for tests
+- Pluggable `TextGenerator` protocol with backends for OpenAI-compatible cloud (`OpenAIStyleGenerator.cloud(...)`), Apple Foundation Models (`FoundationTextGenerator`), all-in-one on-device Gemma 4 via Core ML (`GemmaCoreMLGenerator`), and a `FakeTextGenerator` for tests
 - High-level `engine.answer(_:)` / `engine.answerStream(_:)` that retrieve, prompt, generate, and resolve inline citation markers in one call — returning `Answer.text`, `.citations`, `.usedPassages`, and a heuristic `.confidence`
 - One-line ingest helpers: `engine.ingest(url:)`, `engine.ingest(text:name:)`, `engine.retrieve(_:)`
 
 ## Planned Features
 
 - More file types (HTML/RTF/CSV/XLSX/PPTX/ZIP)
-- In-process on-device LLM generation (LiteRT-LM Gemma) — blocked on SPM packaging; today the on-device path is `FoundationTextGenerator` (iOS 26+/macOS 26+) and `OpenAIStyleGenerator.cloud(.ollama(...))` for a local Ollama
 - Native (non-OpenAI-compat) Anthropic and Gemini generators for provider-specific features
 - Reranking, HyDE, query rewriting, refusal/confidence policy helpers
 - Eval fixtures and retrieval metrics
@@ -367,6 +366,26 @@ if #available(iOS 26, macOS 26, *) {
     )
 }
 ```
+
+### On-device generation (Gemma 4, Core ML)
+
+`GemmaCoreMLGenerator` wraps `CoreMLLLM`'s prebuilt Gemma 4 bundles (hosted by `mlboydaisuke` on Hugging Face). On first use it auto-downloads the model bundle (multi-GB) into `CoreMLLLM`'s managed cache and runs every subsequent call on the Apple Neural Engine. Opt-in only — never wired automatically — so callers never trigger an unexpected gigabyte download.
+
+```swift
+if #available(iOS 18, macOS 15, *) {
+    // .e4b (default) is higher quality; .e2b is lower latency on older devices.
+    let generator = GemmaCoreMLGenerator(size: .e4b)
+    let engine = try FolioEngine.inMemory(
+        embeddingProvider: provider,
+        textGenerator: generator
+    )
+
+    // Optional: absorb the multi-GB warmup in the background at launch.
+    Task.detached { try? await generator.prepare() }
+}
+```
+
+`GenerationRequest.temperature` is ignored (CoreMLLLM does not expose it); `maxTokens` is honoured. The provider downloads model files via `CoreMLLLM.ModelDownloader`, so the cache location is whatever that downloader uses on the host platform.
 
 ### Tests without a real model
 
