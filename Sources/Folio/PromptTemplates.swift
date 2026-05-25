@@ -31,7 +31,7 @@ public struct ChunkContext: Sendable {
 }
 
 public enum LLMPrefixPrompter {
-    public static let maxOutputTokens: Int = 80
+    public static let maxOutputTokens: Int = 160
     public static let stop: [String] = ["\n\n", "\n", "###", "---", "```"]
 
     public static func build(_ ctx: ChunkContext) -> String {
@@ -48,8 +48,6 @@ public enum LLMPrefixPrompter {
         \(name) — \(header) — \(page)
         </document>
 
-        Here is the chunk we want to situate within the whole document:
-
         <left>
         \(left)
         </left>
@@ -62,14 +60,18 @@ public enum LLMPrefixPrompter {
         \(right)
         </right>
 
-        Please give a short, succinct context to situate this chunk within the overall document for the purposes of improving search retrieval.
+        Write a single dense retrieval prefix for the chunk above. The prefix is
+        prepended to the chunk before indexing, so it should make the chunk
+        findable by listing its main topics, named entities, key facts, sections,
+        and any specific values (numbers, dates, identifiers) that appear in it.
 
         Requirements:
-        - Return only ONE short line (<= \(maxOutputTokens) tokens).
-        - No explanations, no reasoning, no extra text.
-        - Output must be a single line (no newlines).
-        - Prefer concrete nouns (e.g., "Evaluation setup — metrics and datasets").
-        - Keep to ~5–12 words; no trailing punctuation.
+        - Cover ALL distinct topics/sections present in the chunk. If the chunk
+          spans multiple sections (e.g. "Education" AND "Experience"), name each.
+        - Use ONLY facts that literally appear in the chunk. Do not invent.
+        - Prefer concrete nouns and proper names over verbs and generalities.
+        - One line, semicolon-separated phrases. Aim for 20–40 words total
+          (~60–120 tokens). No trailing punctuation. No reasoning or explanation.
         - Language: \(locale).
 
         Your single line:

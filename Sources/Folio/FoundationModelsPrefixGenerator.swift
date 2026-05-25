@@ -25,11 +25,18 @@ public actor FoundationModelsPrefixGenerator {
     }
 
     public static let defaultInstructions: String = """
-    You generate short retrieval prefixes for document chunks.
-    Return a single concise line (no newlines) that helps a search system
-    understand how the chunk fits within the wider document.
-    Keep it specific, 5-12 words, and prefer nouns over verbs.
-    Do not add trailing punctuation or numbering.
+    You generate dense retrieval prefixes for document chunks. The prefix is
+    prepended to the chunk before indexing, so it must make the chunk findable
+    by surfacing every distinct topic, named entity, key fact, and specific
+    value (numbers, dates, identifiers) the chunk contains.
+
+    Rules:
+    - Cover ALL major sections present in the chunk. If a chunk spans, say,
+      Education AND Experience AND Skills, name each one explicitly.
+    - Use only facts that literally appear in the chunk. Never invent.
+    - One line, no newlines. Semicolon-separated phrases.
+    - Aim for 20–40 words. Prefer concrete nouns and proper names over verbs.
+    - No leading "Answer:", no numbering, no trailing punctuation.
     """
 
     private var session: LanguageModelSession
