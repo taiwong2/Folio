@@ -61,6 +61,32 @@ public enum IngestInput {
     case data(Data, uti: String, name: String?)
 }
 
+/// Cooperative-cancellation + progress signalling for long ingests.
+///
+/// Each call reports the phase (`.loading`, `.chunking`, `.embedding`) plus the
+/// number of completed/total work units. During `.loading`/`.chunking` the unit
+/// is a page; during `.embedding` it's a chunk. `total` is `nil` until the
+/// chunker has produced its full list and the total chunk count is known.
+public struct IngestProgress: Sendable, Hashable {
+    public enum Phase: Sendable, Hashable {
+        case loading
+        case chunking
+        case embedding
+    }
+
+    public let phase: Phase
+    public let completed: Int
+    public let total: Int?
+
+    public init(phase: Phase, completed: Int, total: Int?) {
+        self.phase = phase
+        self.completed = completed
+        self.total = total
+    }
+}
+
+public typealias IngestProgressHandler = @Sendable (IngestProgress) -> Void
+
 public struct ChunkingConfig: Sendable {
     public var maxTokensPerChunk = 650
     public var overlapTokens = 80

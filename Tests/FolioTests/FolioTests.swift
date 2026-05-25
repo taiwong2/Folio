@@ -156,6 +156,80 @@ final class FolioSmokeTests: XCTestCase {
         XCTAssertEqual(info.dimension, 768)
     }
 
+    func testIngestAsyncProgressReportsLoadingChunkingAndEmbedding() async throws {
+        let provider = FakeEmbeddingProvider(dimension: 4)
+        let folio = try FolioEngine.inMemory(embeddingProvider: provider)
+
+        // Two paragraphs → chunker emits more than one chunk, so we see >1 .embedding event.
+        let body = String(repeating: "Paragraph about retrieval. ", count: 40)
+            + "\n\n"
+            + String(repeating: "Paragraph about chunking. ", count: 40)
+
+        actor Sink {
+            var events: [IngestProgress] = []
+            func append(_ p: IngestProgress) { events.append(p) }
+            func snapshot() -> [IngestProgress] { events }
+        }
+        let sink = Sink()
+
+        _ = try await folio.ingestAsync(.text(body, name: "progress.txt"), sourceId: "prog") { p in
+            Task { await sink.append(p) }
+        }
+
+        // Drain the actor so the Task closures land.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let events = await sink.snapshot()
+
+        XCTAssertTrue(events.contains(where: { $0.phase == .loading }))
+        XCTAssertTrue(events.contains(where: { $0.phase == .chunking }))
+        let embeddingEvents = events.filter { $0.phase == .embedding }
+        XCTAssertFalse(embeddingEvents.isEmpty, "expected at least one .embedding progress event")
+
+        // The final .embedding event should report completed == total.
+        if let last = embeddingEvents.last {
+            XCTAssertEqual(last.completed, last.total)
+        }
+    }
+
+    func testIngestAsyncRespectsCancellation() async throws {
+        // SlowEmbedder gives us a guaranteed suspension point inside the chunk loop so
+        // the outer task has time to flip `isCancelled` before the loop runs to completion.
+        struct SlowEmbedder: EmbeddingProvider {
+            let model = EmbeddingModelInfo(id: "slow", dimension: 4)
+            func embed(_ text: String) async throws -> [Float] {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                return [0, 0, 0, 0]
+            }
+            func embedBatch(_ texts: [String]) async throws -> [[Float]] {
+                try await withThrowingTaskGroup(of: (Int, [Float]).self) { group in
+                    for (i, t) in texts.enumerated() {
+                        group.addTask { (i, try await self.embed(t)) }
+                    }
+                    var out = Array(repeating: [Float](), count: texts.count)
+                    for try await (i, v) in group { out[i] = v }
+                    return out
+                }
+            }
+        }
+
+        let folio = try FolioEngine.inMemory(embeddingProvider: SlowEmbedder())
+
+        let body = String(repeating: "First passage about cancellation.\n\nSecond passage about cancellation.\n\n", count: 20)
+
+        let task = Task {
+            try await folio.ingestAsync(.text(body, name: "cancel.txt"), sourceId: "cancel")
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {
+            // expected
+        }
+    }
+
     func testSearchHybridReturnsCosineScoredResults() async throws {
         let provider = FakeEmbeddingProvider(dimension: 4)
         let folio = try FolioEngine.inMemory(embeddingProvider: provider)

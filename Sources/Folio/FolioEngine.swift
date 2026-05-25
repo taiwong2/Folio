@@ -122,7 +122,7 @@ public final class FolioEngine {
 
     public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
-        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
@@ -131,14 +131,14 @@ public final class FolioEngine {
 
     public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
-        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
     }
 
     public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws -> FolioEngine {
-        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
 
         return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
@@ -220,17 +220,32 @@ public final class FolioEngine {
     }
     
     
+    /// Async ingest with cooperative cancellation and optional progress reporting.
+    ///
+    /// `progress` (if supplied) fires with `.loading` after the loader returns, `.chunking`
+    /// after chunking, then `.embedding` once per chunk. The task is checked for
+    /// cancellation between each chunk and before each embedding call so callers can
+    /// abort large documents without waiting for the loop to finish.
     @discardableResult
-    public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int) {
-        
+    public func ingestAsync(
+        _ input: IngestInput,
+        sourceId: String,
+        config: FolioConfig = .init(),
+        progress: IngestProgressHandler? = nil
+    ) async throws -> (pages: Int, chunks: Int) {
+
         guard let loader = loaders.first(where: { $0.supports(input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
-        
+
+        try Task.checkCancellation()
         let doc = try loader.load(input)
+        progress?(IngestProgress(phase: .loading, completed: doc.pages.count, total: doc.pages.count))
+
+        try Task.checkCancellation()
         let cleaned = HeaderFooterFilter.strip(doc)
         let metadata = sourceMetadata(for: input, document: doc)
-        
+
         try? store.deleteChunks(forSourceId: sourceId)
         try? store.upsertSource(
             id: sourceId,
@@ -243,10 +258,16 @@ public final class FolioEngine {
             chunks: 0
         )
 
+        try Task.checkCancellation()
         let pieces = try chunker.chunk(sourceId: sourceId, doc: cleaned, config: config.chunking)
+        progress?(IngestProgress(phase: .chunking, completed: pieces.count, total: pieces.count))
+
         var inserted = 0
-        
+        let total = pieces.count
+
         for c in pieces {
+            try Task.checkCancellation()
+
             let pg = c.page.flatMap { idx in cleaned.pages.first { $0.index == idx } } ?? cleaned.pages.first!
 
             let key = store.cacheKey(sourceId: c.sourceId, page: c.page, chunk: c.text)
@@ -255,7 +276,7 @@ public final class FolioEngine {
             if config.indexing.useContextualPrefix && prefix.isEmpty {
                 if let f = config.indexing.contextFn {
                     let raw = (try? await f(cleaned, pg, c.text)) ?? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text)
-                    
+
                     var line = raw.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
                     if line.count > 600 { line = String(line.prefix(600)) }
                     prefix = line.isEmpty ? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text) : line
@@ -286,6 +307,7 @@ public final class FolioEngine {
 
             inserted += 1
             if let embeddingProvider {
+                try Task.checkCancellation()
                 let vec = try await embeddingProvider.embed(augmented)
                 try store.insertVector(
                     chunkId: newChunk.chunkId,
@@ -294,6 +316,8 @@ public final class FolioEngine {
                     vector: vec
                 )
             }
+
+            progress?(IngestProgress(phase: .embedding, completed: inserted, total: total))
         }
 
         try? store.upsertSource(
@@ -720,6 +744,10 @@ private func sourceMetadata(for input: IngestInput, document: LoadedDocument) ->
         let fileType: String
         if isMarkdownUTI(uti) {
             fileType = "markdown"
+        } else if isDOCXUTI(uti) {
+            fileType = "docx"
+        } else if isImageUTI(uti) {
+            fileType = "image"
         } else {
             fileType = uti.split(separator: ".").last.map(String.init) ?? "data"
         }
@@ -737,4 +765,15 @@ private func sourceMetadata(for input: IngestInput, document: LoadedDocument) ->
 private func isMarkdownUTI(_ uti: String) -> Bool {
     let normalized = uti.lowercased()
     return normalized == "net.daringfireball.markdown" || normalized == "public.markdown" || normalized == "public.md"
+}
+
+private func isDOCXUTI(_ uti: String) -> Bool {
+    let normalized = uti.lowercased()
+    return normalized == "org.openxmlformats.wordprocessingml.document" || normalized == "com.microsoft.word.docx"
+}
+
+private func isImageUTI(_ uti: String) -> Bool {
+    let normalized = uti.lowercased()
+    if normalized == "public.image" { return true }
+    return ImageDocumentLoader.supportedUTIs.contains(normalized)
 }
