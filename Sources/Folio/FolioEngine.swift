@@ -122,9 +122,23 @@ public final class FolioEngine {
     private let embeddingProvider: EmbeddingProvider?
     private let textGenerator: TextGenerator?
 
+    /// Default loader stack used when callers don't supply their own. Order
+    /// matters: dispatch picks the first `supports(_:)` match. Single source of
+    /// truth referenced by the three convenience initializers below.
+    public static func defaultLoaders() -> [DocumentLoader] {
+        [
+            PDFDocumentLoader(),
+            MarkdownDocumentLoader(),
+            DOCXDocumentLoader(),
+            HTMLDocumentLoader(),
+            ImageDocumentLoader(),
+            TextDocumentLoader()
+        ]
+    }
+
     public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
-        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? Self.defaultLoaders()
         let useChunker = chunker ?? UniversalChunker()
 
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
@@ -133,7 +147,7 @@ public final class FolioEngine {
 
     public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
-        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? Self.defaultLoaders()
         let useChunker = chunker ?? UniversalChunker()
 
         try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
@@ -186,6 +200,8 @@ public final class FolioEngine {
         case "txt", "log": uti = nil // route through .text path
         case "md", "markdown": uti = "public.markdown"
         case "docx": uti = "org.openxmlformats.wordprocessingml.document"
+        case "html", "htm": uti = "public.html"
+        case "rtf": uti = "public.rtf"
         case "png": uti = "public.png"
         case "jpg", "jpeg": uti = "public.jpeg"
         case "heic", "heif": uti = "public.heic"
@@ -204,7 +220,7 @@ public final class FolioEngine {
     }
 
     public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embeddingProvider: EmbeddingProvider? = nil, textGenerator: TextGenerator? = nil) throws -> FolioEngine {
-        let useLoaders = loaders ?? [PDFDocumentLoader(), MarkdownDocumentLoader(), DOCXDocumentLoader(), ImageDocumentLoader(), TextDocumentLoader()]
+        let useLoaders = loaders ?? Self.defaultLoaders()
         let useChunker = chunker ?? UniversalChunker()
 
         return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embeddingProvider: embeddingProvider, textGenerator: textGenerator)
