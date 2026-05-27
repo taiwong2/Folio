@@ -132,6 +132,7 @@ public final class FolioEngine {
             DOCXDocumentLoader(),
             HTMLDocumentLoader(),
             CSVDocumentLoader(),
+            StructuredDataLoader(),
             ImageDocumentLoader(),
             TextDocumentLoader()
         ]
@@ -205,6 +206,9 @@ public final class FolioEngine {
         case "rtf": uti = "public.rtf"
         case "csv": uti = "public.comma-separated-values-text"
         case "tsv": uti = "public.tab-separated-values-text"
+        case "json": uti = "public.json"
+        case "xml": uti = "public.xml"
+        case "yaml", "yml": uti = "public.yaml"
         case "png": uti = "public.png"
         case "jpg", "jpeg": uti = "public.jpeg"
         case "heic", "heif": uti = "public.heic"
