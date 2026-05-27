@@ -167,6 +167,108 @@ public struct AnswerTemplate: Sendable {
             ChatMessage(role: .user, content: context)
         ]
     }
+
+    /// Strict variant of `.default` that explicitly instructs the model to emit
+    /// the literal token `[NO_ANSWER]` when the passages do not contain enough
+    /// information. Pairs with `AnswerPolicy` on `FolioEngine.answer` to turn
+    /// that token into a structured refusal.
+    public static let strict = AnswerTemplate { question, passages in
+        let system = """
+        You are a careful assistant. Answer the user's question using ONLY the passages below.
+
+        Citation rules (required):
+        • Every factual claim must be followed by a numbered marker like [1] or [2] referring to the passage that supports it.
+        • If a single sentence draws on multiple passages, list each: "X did Y [1][3]."
+
+        Refusal rule (critical):
+        • If the passages do not contain enough information to answer the question, respond with exactly the token [NO_ANSWER] and nothing else.
+        • Do not guess, infer, or fall back to outside knowledge.
+        """
+
+        var context = ""
+        for (i, passage) in passages.enumerated() {
+            let n = i + 1
+            let source = passage.citations.first?.sourceName ?? passage.sourceId
+            let section = passage.citations.first?.sectionTitle
+            let header = section.map { "\(source) — \($0)" } ?? source
+            context += "[\(n)] (\(header))\n\(passage.text)\n\n"
+        }
+        context += "Question: \(question)"
+
+        return [
+            ChatMessage(role: .system, content: system),
+            ChatMessage(role: .user, content: context)
+        ]
+    }
+}
+
+/// Opt-in safety thresholds applied to a generated `Answer`. Any threshold
+/// left as `nil` is not enforced; the default-initialised `AnswerPolicy`
+/// preserves the V1 behavior of always returning the model's text.
+///
+/// When any check trips, `FolioEngine.answer` returns an `Answer` whose
+/// `text` is `refusalText`, citations are empty, and `confidence` is `0`.
+/// `usedPassages` is still populated so callers can show what was searched.
+public struct AnswerPolicy: Sendable {
+    /// Reject answers whose `Answer.confidence` (mean fused score of cited
+    /// passages) falls below this value. `nil` disables the check.
+    public var minConfidence: Double?
+
+    /// Reject answers that resolved zero citations.
+    public var requireCitations: Bool
+
+    /// Reject answers whose quoted spans don't appear verbatim in any
+    /// cited passage at this rate or higher. `nil` disables.
+    public var minQuoteGrounding: Double?
+
+    /// Reject answers whose numeric tokens don't appear in any cited
+    /// passage at this rate or higher. `nil` disables.
+    public var minNumericConsistency: Double?
+
+    /// The text returned in place of the model's output when any check trips.
+    public var refusalText: String
+
+    public init(
+        minConfidence: Double? = nil,
+        requireCitations: Bool = false,
+        minQuoteGrounding: Double? = nil,
+        minNumericConsistency: Double? = nil,
+        refusalText: String = "I couldn't find that in the provided sources."
+    ) {
+        self.minConfidence = minConfidence
+        self.requireCitations = requireCitations
+        self.minQuoteGrounding = minQuoteGrounding
+        self.minNumericConsistency = minNumericConsistency
+        self.refusalText = refusalText
+    }
+
+    /// Permissive default — preserves prior behavior. The `[NO_ANSWER]` token
+    /// check is always on regardless of this policy.
+    public static let `default` = AnswerPolicy()
+
+    /// Opinionated strict preset: requires citations and a minimum confidence
+    /// of 0.3. Suitable when paired with `AnswerTemplate.strict`.
+    public static let strict = AnswerPolicy(minConfidence: 0.3, requireCitations: true)
+}
+
+/// Decides whether a generated answer should be replaced with a refusal. The
+/// `[NO_ANSWER]` token check always runs; threshold checks only run when the
+/// corresponding policy field is non-nil.
+func shouldRefuseAnswer(
+    text: String,
+    citations: [Citation],
+    confidence: Double,
+    passages: [RetrievedResult],
+    policy: AnswerPolicy
+) -> Bool {
+    if text.contains("[NO_ANSWER]") { return true }
+    if let min = policy.minConfidence, confidence < min { return true }
+    if policy.requireCitations && citations.isEmpty { return true }
+    if let min = policy.minQuoteGrounding,
+       quoteGrounding(text: text, passages: passages) < min { return true }
+    if let min = policy.minNumericConsistency,
+       numericConsistency(text: text, passages: passages) < min { return true }
+    return false
 }
 
 /// Resolves inline `[N]` markers in generated text into a deduplicated, in-order list

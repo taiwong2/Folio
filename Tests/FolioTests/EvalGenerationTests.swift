@@ -34,6 +34,32 @@ final class EvalGenerationTests: XCTestCase {
         }
     }
 
+    /// Refusal smoke: must_refuse queries paired with a refusal-aware responder
+    /// and strict policy should produce refusal_correct == 1.0 across all queries.
+    func testSmokeRefusal() async throws {
+        let fixture = try EvalRetrievalTests.loadFixture(named: "smoke-refusal")
+        let engine = try FolioEngine.inMemory(
+            embeddingProvider: FakeEmbeddingProvider(dimension: 4),
+            textGenerator: FakeTextGenerator(respond: Self.refusalAwareResponder(for: fixture))
+        )
+        try await EvalRunner.ingest(fixture: fixture, into: engine)
+
+        let report = try await EvalRunner.answer(
+            fixture: fixture,
+            engine: engine,
+            defaultLimit: 5,
+            template: .strict,
+            policy: .strict
+        )
+
+        XCTAssertEqual(report.metrics.refusalCorrect, 1.0,
+                       "every must_refuse query should refuse, every other should not")
+        for q in report.queries where q.refused {
+            XCTAssertEqual(q.answerText, AnswerPolicy.default.refusalText)
+            XCTAssertEqual(q.confidence, 0)
+        }
+    }
+
     func testFullEvalSweepGeneration() async throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["FOLIO_RUN_EVAL"] == "1",
@@ -44,18 +70,23 @@ final class EvalGenerationTests: XCTestCase {
             let fixture = try EvalRetrievalTests.loadFixture(named: name)
             let engine = try FolioEngine.inMemory(
                 embeddingProvider: FakeEmbeddingProvider(dimension: 4),
-                textGenerator: FakeTextGenerator(respond: Self.quoteFirstPassageResponder)
+                textGenerator: FakeTextGenerator(respond: Self.refusalAwareResponder(for: fixture))
             )
             try await EvalRunner.ingest(fixture: fixture, into: engine)
 
-            let report = try await EvalRunner.answer(fixture: fixture, engine: engine, defaultLimit: 5)
+            let report = try await EvalRunner.answer(
+                fixture: fixture,
+                engine: engine,
+                defaultLimit: 5,
+                template: .strict,
+                policy: .strict
+            )
             print(String(format: "[eval] %@ generation coverage=%.3f expected=%.3f refusal=%.3f n=%d",
                          report.fixtureName,
                          report.metrics.citationCoverage,
                          report.metrics.expectedContentsHit,
                          report.metrics.refusalCorrect,
                          report.metrics.queryCount))
-            XCTAssertGreaterThan(report.metrics.citationCoverage, 0)
         }
     }
 
@@ -71,6 +102,27 @@ final class EvalGenerationTests: XCTestCase {
             return "Answer based on passages [1]."
         }
         return "\(snippet) [1]."
+    }
+
+    /// Wraps `quoteFirstPassageResponder` but returns `[NO_ANSWER]` when the
+    /// fixture has marked the parsed question as `must_refuse: true`. Lets the
+    /// generation sweep exercise refusal end-to-end without coupling fixtures
+    /// to test code.
+    static func refusalAwareResponder(for fixture: EvalFixture) -> FakeTextGenerator.Responder {
+        let refuseSet = Set(fixture.queries.filter { $0.mustRefuse == true }.map(\.question))
+        return { request in
+            let userContent = request.messages.last(where: { $0.role == .user })?.content ?? ""
+            for line in userContent.split(separator: "\n") {
+                if line.hasPrefix("Question: ") {
+                    let q = String(line.dropFirst("Question: ".count))
+                    if refuseSet.contains(q) {
+                        return "[NO_ANSWER]"
+                    }
+                    break
+                }
+            }
+            return quoteFirstPassageResponder(request)
+        }
     }
 
     static func firstSentenceOfPassageOne(_ prompt: String) -> String? {

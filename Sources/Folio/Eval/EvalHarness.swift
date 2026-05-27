@@ -169,7 +169,9 @@ public enum EvalRunner {
     public static func answer(
         fixture: EvalFixture,
         engine: FolioEngine,
-        defaultLimit: Int = 5
+        defaultLimit: Int = 5,
+        template: AnswerTemplate = .default,
+        policy: AnswerPolicy = .default
     ) async throws -> EvalGenerationReport {
         var results: [GenerationQueryResult] = []
         var coverageSum = 0.0
@@ -180,9 +182,9 @@ public enum EvalRunner {
 
         for q in fixture.queries {
             let limit = q.limit ?? defaultLimit
-            let ans = try await engine.answer(q.question, limit: limit)
+            let ans = try await engine.answer(q.question, limit: limit, template: template, policy: policy)
             let citedSourceIds = Array(Set(ans.citations.map(\.sourceId))).sorted()
-            let refused = ans.text.contains("[NO_ANSWER]")
+            let refused = ans.text.contains("[NO_ANSWER]") || ans.text == policy.refusalText
             let coverage = computeCitationCoverage(ans.text)
             coverageSum += coverage
 

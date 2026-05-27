@@ -1,0 +1,28 @@
+{
+  "name": "smoke-refusal",
+  "documents": [
+    {
+      "name": "weather.txt",
+      "text": "The weather in Paris is mild in spring. Average temperatures range from 8 to 16 degrees Celsius in April and May."
+    },
+    {
+      "name": "transit.txt",
+      "text": "The Paris metro operates 14 lines and serves more than 300 stations across the city and inner suburbs."
+    }
+  ],
+  "queries": [
+    {
+      "question": "What is the weather like in Paris?",
+      "must_cite_source_ids": ["weather.txt"],
+      "expected_answer_contains": ["mild"]
+    },
+    {
+      "question": "How many quantum entanglement experiments has CERN run this year?",
+      "must_refuse": true
+    },
+    {
+      "question": "What is the average lifespan of a giraffe in the wild?",
+      "must_refuse": true
+    }
+  ]
+}

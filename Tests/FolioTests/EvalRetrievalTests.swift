@@ -54,7 +54,7 @@ final class EvalRetrievalTests: XCTestCase {
 
     // MARK: - Helpers
 
-    static let allFixtureNames = ["smoke-prose", "smoke-multidoc"]
+    static let allFixtureNames = ["smoke-prose", "smoke-multidoc", "smoke-refusal"]
 
     static func loadFixture(named name: String) throws -> EvalFixture {
         let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "eval")

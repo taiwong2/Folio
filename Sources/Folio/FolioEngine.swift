@@ -792,6 +792,7 @@ public final class FolioEngine {
         filter: RetrievalFilter = .init(),
         limit: Int = 5,
         template: AnswerTemplate = .default,
+        policy: AnswerPolicy = .default,
         temperature: Double? = 0.2,
         maxTokens: Int? = 1024
     ) async throws -> Answer {
@@ -811,6 +812,10 @@ public final class FolioEngine {
         let citations = resolveCitationMarkers(in: text, passages: passages)
         let confidence = computeAnswerConfidence(in: text, passages: passages)
 
+        if shouldRefuseAnswer(text: text, citations: citations, confidence: confidence, passages: passages, policy: policy) {
+            return Answer(text: policy.refusalText, citations: [], usedPassages: passages, confidence: 0)
+        }
+
         return Answer(text: text, citations: citations, usedPassages: passages, confidence: confidence)
     }
 
@@ -825,6 +830,7 @@ public final class FolioEngine {
         filter: RetrievalFilter = .init(),
         limit: Int = 5,
         template: AnswerTemplate = .default,
+        policy: AnswerPolicy = .default,
         temperature: Double? = 0.2,
         maxTokens: Int? = 1024
     ) async throws -> AsyncThrowingStream<AnswerStreamEvent, Error> {
@@ -859,7 +865,13 @@ public final class FolioEngine {
 
                 let citations = resolveCitationMarkers(in: accumulated, passages: passages)
                 let confidence = computeAnswerConfidence(in: accumulated, passages: passages)
-                continuation.yield(.done(Answer(text: accumulated, citations: citations, usedPassages: passages, confidence: confidence)))
+                let finalAnswer: Answer
+                if shouldRefuseAnswer(text: accumulated, citations: citations, confidence: confidence, passages: passages, policy: policy) {
+                    finalAnswer = Answer(text: policy.refusalText, citations: [], usedPassages: passages, confidence: 0)
+                } else {
+                    finalAnswer = Answer(text: accumulated, citations: citations, usedPassages: passages, confidence: confidence)
+                }
+                continuation.yield(.done(finalAnswer))
                 continuation.finish()
             }
 
