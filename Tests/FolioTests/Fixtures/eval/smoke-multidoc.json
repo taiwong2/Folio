@@ -1,0 +1,34 @@
+{
+  "name": "smoke-multidoc",
+  "documents": [
+    {
+      "name": "alpha.txt",
+      "text": "Alpha is the project codename for the indexing pipeline. The Alpha pipeline ingests PDFs, Markdown, and plain text. It writes chunks to a SQLite database backed by the FTS5 extension for lexical search."
+    },
+    {
+      "name": "beta.txt",
+      "text": "Beta is the project codename for the retrieval layer. The Beta retriever fuses BM25 scores with dense vector cosine similarity and applies maximum marginal relevance to diversify the result set."
+    },
+    {
+      "name": "gamma.txt",
+      "text": "Gamma is the project codename for the answer generator. The Gamma generator turns retrieved passages into a cited answer using a configurable language model backend."
+    }
+  ],
+  "queries": [
+    {
+      "question": "Which pipeline writes chunks to SQLite?",
+      "must_cite_source_ids": ["alpha.txt"],
+      "expected_answer_contains": ["Alpha"]
+    },
+    {
+      "question": "Which retriever uses maximum marginal relevance?",
+      "must_cite_source_ids": ["beta.txt"],
+      "expected_answer_contains": ["Beta"]
+    },
+    {
+      "question": "Which component generates cited answers?",
+      "must_cite_source_ids": ["gamma.txt"],
+      "expected_answer_contains": ["Gamma"]
+    }
+  ]
+}

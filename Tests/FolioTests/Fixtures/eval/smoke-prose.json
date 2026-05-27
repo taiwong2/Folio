@@ -1,0 +1,29 @@
+{
+  "name": "smoke-prose",
+  "documents": [
+    {
+      "name": "rag-notes.md",
+      "text": "# Retrieval Augmented Generation\n\nRetrieval augmented generation, often abbreviated RAG, is a technique that combines a search index over a corpus of documents with a generative language model. At query time the system retrieves the passages most relevant to the user's question and supplies them as context to the model, which then composes an answer grounded in those passages.\n\nThe two core components of a RAG system are the retriever and the generator. The retriever ranks chunks of source text by relevance; the generator turns the retrieved chunks into a fluent natural-language answer. Hybrid retrievers blend lexical signals such as BM25 with dense vector similarity to balance keyword and semantic matching.\n\nBecause the generator only sees the retrieved chunks, careful chunking and ranking matter as much as the model itself. Citations are commonly added so readers can verify the answer against the source passages."
+    },
+    {
+      "name": "embeddings-overview.md",
+      "text": "# Embeddings\n\nA text embedding is a fixed-length vector representation of a piece of text such that semantically similar texts map to nearby vectors. Embedding models are trained to push paraphrases close together and unrelated texts far apart in vector space.\n\nDense retrieval uses cosine similarity over embeddings to find candidate passages. Combined with BM25 in a hybrid retriever, this gives a robust ranking signal across queries that vary in length and specificity."
+    }
+  ],
+  "queries": [
+    {
+      "question": "What does RAG combine?",
+      "must_cite_source_ids": ["rag-notes.md"],
+      "expected_answer_contains": ["retrieval"]
+    },
+    {
+      "question": "How are dense retrievers ranked?",
+      "must_cite_source_ids": ["embeddings-overview.md"],
+      "expected_answer_contains": ["cosine"]
+    },
+    {
+      "question": "Why are citations useful in RAG?",
+      "must_cite_source_ids": ["rag-notes.md"]
+    }
+  ]
+}
